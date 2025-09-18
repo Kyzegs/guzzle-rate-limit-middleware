@@ -1,0 +1,45 @@
+{
+    "name": "kyzegs/guzzle-rate-limit-middleware",
+    "description": "A configurable Guzzle middleware for rate limiting HTTP requests based on response headers",
+    "type": "library",
+    "keywords": ["guzzle", "middleware", "rate-limit", "http", "api"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Sebastiaan",
+            "email": "kyzegs@gmail.com"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "guzzlehttp/guzzle": "^7.0",
+        "psr/http-message": "^1.0|^2.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0",
+        "phpstan/phpstan": "^1.0"
+    },
+    "suggest": {
+        "illuminate/cache": "Required for LaravelCacheHandler and LaravelLockHandler",
+        "illuminate/log": "Required for LaravelLogger",
+        "illuminate/support": "Required for Laravel integration",
+        "symfony/cache": "Required for SymfonyCacheHandler",
+        "symfony/lock": "Required for SymfonyLockHandler",
+        "psr/log": "Required for SymfonyLogger (PSR-3 compatible logger)"
+    },
+    "autoload": {
+        "psr-4": {
+            "Kyzegs\\GuzzleRateLimitMiddleware\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Kyzegs\\GuzzleRateLimitMiddleware\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true
+    }
+}
