@@ -8,28 +8,30 @@ use Kyzegs\GuzzleRateLimitMiddleware\BucketHashHandlers\NullBucketHashDiscovery;
 use Kyzegs\GuzzleRateLimitMiddleware\CacheHandlers\ArrayCacheHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\Configuration\RateLimitConfig;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\CacheHandlerInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockHandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LoggerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RouteResolverInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Handlers\RateLimitHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\LockHandlers\NullLockHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\Loggers\NullLogger;
 use Kyzegs\GuzzleRateLimitMiddleware\RetryHandlers\NullRetryHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\RetryHandlers\StandardRetryHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\RouteResolvers\DefaultRouteResolver;
-use Kyzegs\GuzzleRateLimitMiddleware\RouteResolvers\DiscordRouteResolver;
 use Psr\Http\Message\RequestInterface;
 
 /**
  * Guzzle middleware for intelligent rate limiting based on response headers.
  * 
- * This class follows SOLID principles by acting as a factory and orchestrator
- * for the actual processing logic, which is handled by dedicated classes.
+ * This class acts as a factory and orchestrator for the actual handling logic,
+ * which can be customized by providing different HandlerInterface implementations.
  */
 class RateLimitMiddleware
 {
-    private readonly RateLimitProcessor $processor;
+    private readonly HandlerInterface $handler;
 
     public function __construct(
+        ?HandlerInterface $handler = null,
         ?CacheHandlerInterface $cacheHandler = null,
         ?RouteResolverInterface $routeResolver = null,
         ?RateLimitConfig $config = null,
@@ -38,6 +40,12 @@ class RateLimitMiddleware
         int $maxRetries = 0,
         bool $enableBucketHashDiscovery = false
     ) {
+        if ($handler !== null) {
+            $this->handler = $handler;
+            return;
+        }
+
+        // Create default handler if none provided
         $resolvedConfig = $config ?? new RateLimitConfig();
         
         $bucketManager = new BucketManager(
@@ -46,7 +54,7 @@ class RateLimitMiddleware
             $resolvedConfig
         );
 
-        $this->processor = new RateLimitProcessor(
+        $this->handler = new RateLimitHandler(
             bucketManager: $bucketManager,
             lockHandler: $lockHandler ?? new NullLockHandler(),
             logger: $logger ?? new NullLogger(),
@@ -58,9 +66,17 @@ class RateLimitMiddleware
     }
 
     /**
-     * Create a new middleware instance with custom configuration.
+     * Create a new middleware instance with custom handler.
      */
-    public static function create(
+    public static function create(HandlerInterface $handler): static
+    {
+        return new static($handler);
+    }
+
+    /**
+     * Create a new middleware instance with custom configuration using default handler.
+     */
+    public static function createWithDefaults(
         CacheHandlerInterface $cacheHandler,
         RouteResolverInterface $routeResolver,
         RateLimitConfig $config,
@@ -70,23 +86,24 @@ class RateLimitMiddleware
         bool $enableBucketHashDiscovery = false
     ): static {
         return new static(
-            $cacheHandler,
-            $routeResolver,
-            $config,
-            $lockHandler,
-            $logger,
-            $maxRetries,
-            $enableBucketHashDiscovery
+            handler: null,
+            cacheHandler: $cacheHandler,
+            routeResolver: $routeResolver,
+            config: $config,
+            lockHandler: $lockHandler,
+            logger: $logger,
+            maxRetries: $maxRetries,
+            enableBucketHashDiscovery: $enableBucketHashDiscovery
         );
     }
 
     /**
-     * Main middleware handler - delegates to the processor.
+     * Main middleware handler - delegates to the handler.
      */
     public function __invoke(callable $handler): Closure
     {
         return function (RequestInterface $request, array $options) use ($handler) {
-            return $this->processor->process($handler, $request, $options);
+            return $this->handler->handle($handler, $request, $options);
         };
     }
 }

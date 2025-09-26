@@ -1,24 +1,25 @@
 <?php
 
-namespace Kyzegs\GuzzleRateLimitMiddleware;
+namespace Kyzegs\GuzzleRateLimitMiddleware\Handlers;
 
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Promise\PromiseInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\BucketManager;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketHashDiscoveryInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockHandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LoggerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryHandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Traits\DelayTrait;
 use Psr\Http\Message\RequestInterface;
-use Psr\Http\Message\ResponseInterface;
 
 /**
- * Processes rate-limited requests with proper locking, retries, and bucket hash discovery.
+ * Default handler for rate-limited requests with blocking behavior.
  * 
- * This class follows the Single Responsibility Principle by focusing solely on
- * the request processing workflow.
+ * This class implements the traditional rate limiting approach where
+ * requests wait/sleep when rate limits are encountered.
  */
-class RateLimitProcessor
+class RateLimitHandler implements HandlerInterface
 {
     use DelayTrait;
 
@@ -31,9 +32,9 @@ class RateLimitProcessor
     ) {}
 
     /**
-     * Process a request with rate limiting, retries, and bucket hash discovery.
+     * Handle a request with rate limiting, retries, and bucket hash discovery.
      */
-    public function process(callable $handler, RequestInterface $request, array $options)
+    public function handle(callable $handler, RequestInterface $request, array $options): mixed
     {
         $bucketKey = $this->bucketManager->routeResolver->getFallbackKey($request, $options['route_context'] ?? null);
         $lock = $this->lockHandler->lock(sprintf('rate_limit_lock:%s', $bucketKey));
@@ -65,7 +66,6 @@ class RateLimitProcessor
                     $tries++;
                     continue;
                 }
-
 
                 // Return response (success or final failure)
                 if ($promise instanceof PromiseInterface) {
@@ -105,6 +105,4 @@ class RateLimitProcessor
 
         $this->delay($delay);
     }
-
 }
- 
