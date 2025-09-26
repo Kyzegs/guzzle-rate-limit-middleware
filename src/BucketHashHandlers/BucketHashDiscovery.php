@@ -23,7 +23,8 @@ class BucketHashDiscovery implements BucketHashDiscoveryInterface
     public function handleDiscovery(
         RequestInterface $request,
         ResponseInterface $response,
-        LoggerInterface $logger
+        LoggerInterface $logger,
+        array $options = []
     ): void {
         if (!$this->enabled) {
             return;
@@ -45,7 +46,8 @@ class BucketHashDiscovery implements BucketHashDiscoveryInterface
             return;
         }
         
-        $routeKey = $this->bucketManager->routeResolver->resolveRouteKey($request);
+        $context = $options['route_context'] ?? null;
+        $routeKey = $this->bucketManager->routeResolver->resolveRouteKey($request, $context);
         $currentHashKey = sprintf('bucket_hash:%s', $routeKey);
         $currentHash = $this->bucketManager->cacheHandler->get($currentHashKey);
         
@@ -59,7 +61,7 @@ class BucketHashDiscovery implements BucketHashDiscoveryInterface
                 ));
                 
                 // Clear old rate limit data with old hash
-                $majorParams = $this->bucketManager->routeResolver->extractMajorParameters($request);
+                $majorParams = $this->bucketManager->routeResolver->extractMajorParameters($request, $context);
                 $oldFullKey = $majorParams ? sprintf('%s:%s', $currentHash, $majorParams) : $currentHash;
                 $oldCacheKey = sprintf('rate_limit:%s', $oldFullKey);
                 $this->bucketManager->cacheHandler->forget($oldCacheKey);

@@ -16,7 +16,8 @@ class NullBucketHashDiscovery implements BucketHashDiscoveryInterface
     public function handleDiscovery(
         RequestInterface $request,
         ResponseInterface $response,
-        LoggerInterface $logger
+        LoggerInterface $logger,
+        array $options = []
     ): void {
         // Do nothing
     }

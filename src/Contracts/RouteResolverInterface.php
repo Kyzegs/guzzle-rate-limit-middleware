@@ -23,9 +23,10 @@ interface RouteResolverInterface
      * Example: "GET /channels/{channel_id}/messages"
      *
      * @param RequestInterface $request
+     * @param mixed $context Optional context (e.g., Route object)
      * @return string
      */
-    public function resolveRouteKey(RequestInterface $request): string;
+    public function resolveRouteKey(RequestInterface $request, mixed $context = null): string;
 
     /**
      * Extract major parameters that subdivide rate limit buckets.
@@ -33,16 +34,18 @@ interface RouteResolverInterface
      * For most APIs: empty string (no subdivision)
      *
      * @param RequestInterface $request
+     * @param mixed $context Optional context (e.g., Route object)
      * @return string
      */
-    public function extractMajorParameters(RequestInterface $request): string;
+    public function extractMajorParameters(RequestInterface $request, mixed $context = null): string;
 
     /**
      * Get the full fallback key when no bucket hash is discovered.
      * This combines route key + major parameters.
      *
      * @param RequestInterface $request
+     * @param mixed $context Optional context (e.g., Route object)
      * @return string
      */
-    public function getFallbackKey(RequestInterface $request): string;
+    public function getFallbackKey(RequestInterface $request, mixed $context = null): string;
 }

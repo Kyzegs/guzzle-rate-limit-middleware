@@ -35,7 +35,7 @@ class RateLimitProcessor
      */
     public function process(callable $handler, RequestInterface $request, array $options)
     {
-        $bucketKey = $this->bucketManager->routeResolver->getFallbackKey($request);
+        $bucketKey = $this->bucketManager->routeResolver->getFallbackKey($request, $options['route_context'] ?? null);
         $lock = $this->lockHandler->lock(sprintf('rate_limit_lock:%s', $bucketKey));
         $tries = 0;
 
@@ -44,38 +44,28 @@ class RateLimitProcessor
             
             try {
                 // Check if we need to delay for rate limiting
-                $this->handleRateLimitDelay($request, $bucketKey);
+                $this->handleRateLimitDelay($request, $bucketKey, $options);
 
                 // Make the request
                 $promise = $handler($request, $options);
                 $response = $promise instanceof PromiseInterface ? $promise->wait() : $promise;
                 
                 // Handle bucket hash discovery
-                $this->bucketHashDiscovery->handleDiscovery($request, $response, $this->logger);
+                $this->bucketHashDiscovery->handleDiscovery($request, $response, $this->logger, $options);
                 
                 // Update rate limit from response
-                $this->bucketManager->updateFromResponse($request, $response);
+                $this->bucketManager->updateFromResponse($request, $response, $options);
                 
                 // Check if we should retry
-                if ($this->retryHandler->executeRetry($request, $response, $tries, $this->logger, function() use ($request) {
+                if ($this->retryHandler->executeRetry($request, $response, $tries, $this->logger, function() use ($request, $options) {
                     // Reset rate limit state for 429 responses
-                    $rateLimit = $this->bucketManager->getRateLimit($request);
+                    $rateLimit = $this->bucketManager->getRateLimit($request, $options);
                     $rateLimit->reset();
                 })) {
                     $tries++;
                     continue;
                 }
 
-                // Log if bucket is exhausted (successful response)
-                if ($response->getStatusCode() >= 200 && $response->getStatusCode() < 300) {
-                    $rateLimit = $this->bucketManager->getRateLimit($request);
-                    if ($rateLimit->getRemaining() === 0) {
-                        $this->logger->debug(sprintf(
-                            'Rate limit bucket (%s) has been exhausted. Pre-emptively rate limiting...',
-                            $bucketKey
-                        ));
-                    }
-                }
 
                 // Return response (success or final failure)
                 if ($promise instanceof PromiseInterface) {
@@ -93,22 +83,27 @@ class RateLimitProcessor
     /**
      * Handle rate limit delays before making the request.
      */
-    private function handleRateLimitDelay(RequestInterface $request, string $bucketKey): void
+    private function handleRateLimitDelay(RequestInterface $request, string $bucketKey, array $options = []): void
     {
-        $rateLimit = $this->bucketManager->getRateLimit($request);
+        $rateLimit = $this->bucketManager->getRateLimit($request, $options);
         
-        if ($rateLimit->shouldDelay()) {
-            $sleepSeconds = $rateLimit->getResetAfter();
-            if ($sleepSeconds > 0) {
-                $this->logger->debug(sprintf(
-                    'Sleeping rate limit bucket %s for %.2f seconds.',
-                    $bucketKey,
-                    $sleepSeconds
-                ));
-                
-                $this->delay($sleepSeconds);
-            }
+        if ($rateLimit->shouldDelay() === false) {
+            return;
         }
+
+        $delay = $rateLimit->getResetAfter();
+
+        if ($rateLimit->getRemaining() === 0) {
+            $this->logger->debug(sprintf('Rate limit bucket (%s) has been exhausted. Pre-emptively rate limiting...', $bucketKey));
+        }
+
+        $this->logger->debug(sprintf(
+            'Sleeping rate limit bucket %s for %.2f seconds.',
+            $bucketKey,
+            $delay
+        ));
+
+        $this->delay($delay);
     }
 
 }

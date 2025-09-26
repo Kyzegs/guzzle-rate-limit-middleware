@@ -11,19 +11,19 @@ use Psr\Http\Message\RequestInterface;
  */
 class DefaultRouteResolver implements RouteResolverInterface
 {
-    public function resolveRouteKey(RequestInterface $request): string
+    public function resolveRouteKey(RequestInterface $request, mixed $context = null): string
     {
         $uri = $request->getUri();
         return sprintf('%s %s://%s%s', $request->getMethod(), $uri->getScheme(), $uri->getHost(), $uri->getPath());
     }
 
-    public function extractMajorParameters(RequestInterface $request): string
+    public function extractMajorParameters(RequestInterface $request, mixed $context = null): string
     {
         // Most APIs don't have major parameters
         return '';
     }
 
-    public function getFallbackKey(RequestInterface $request): string
+    public function getFallbackKey(RequestInterface $request, mixed $context = null): string
     {
         return $this->resolveRouteKey($request);
     }

@@ -111,15 +111,15 @@ class RateLimit
     }
 
     /**
-     * Get the delay time in microseconds.
+     * Get the delay time in seconds.
      */
-    public function getDelayMicroseconds(): float
+    public function getDelay(): ?float
     {
         if (!$this->shouldDelay()) {
-            return 0.0;
+            return null;
         }
 
-        return $this->getResetAfter() * 1000000; // Convert to microseconds
+        return $this->getResetAfter();
     }
 
 

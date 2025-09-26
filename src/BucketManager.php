@@ -22,9 +22,9 @@ class BucketManager
     /**
      * Get the rate limit state for a request.
      */
-    public function getRateLimit(RequestInterface $request): RateLimit
+    public function getRateLimit(RequestInterface $request, array $options = []): RateLimit
     {
-        $bucketKey = $this->getEffectiveBucketKey($request);
+        $bucketKey = $this->getEffectiveBucketKey($request, $options);
         $cacheKey = sprintf('rate_limit:%s', $bucketKey);
         
         $rateLimit = $this->cacheHandler->get($cacheKey);
@@ -39,9 +39,9 @@ class BucketManager
     /**
      * Store the rate limit state for a request.
      */
-    public function storeRateLimit(RequestInterface $request, RateLimit $rateLimit): void
+    public function storeRateLimit(RequestInterface $request, RateLimit $rateLimit, array $options = []): void
     {
-        $bucketKey = $this->getEffectiveBucketKey($request);
+        $bucketKey = $this->getEffectiveBucketKey($request, $options);
         $cacheKey = sprintf('rate_limit:%s', $bucketKey);
         
         // Store with appropriate TTL
@@ -56,24 +56,15 @@ class BucketManager
     /**
      * Update rate limit from response and store it.
      */
-    public function updateFromResponse(RequestInterface $request, ResponseInterface $response): RateLimit
+    public function updateFromResponse(RequestInterface $request, ResponseInterface $response, array $options = []): RateLimit
     {
-        $rateLimit = $this->getRateLimit($request);
+        $rateLimit = $this->getRateLimit($request, $options);
         
         // Update from response headers (includes retry-after handling)
         $rateLimit->updateFromResponse($response, $this->config);
-        $this->storeRateLimit($request, $rateLimit);
+        $this->storeRateLimit($request, $rateLimit, $options);
         
         return $rateLimit;
-    }
-
-    /**
-     * Check if a request should be delayed and return delay in microseconds.
-     */
-    public function getDelay(RequestInterface $request): float
-    {
-        $rateLimit = $this->getRateLimit($request);
-        return $rateLimit->getDelayMicroseconds();
     }
 
     /**
@@ -83,12 +74,15 @@ class BucketManager
      * - Try bucket_hash + major_parameters first
      * - Fall back to route_key + major_parameters
      */
-    private function getEffectiveBucketKey(RequestInterface $request): string
+    private function getEffectiveBucketKey(RequestInterface $request, array $options = []): string
     {
-        $routeKey = $this->routeResolver->resolveRouteKey($request);
+        // Extract context from options if available
+        $context = $options['route_context'] ?? null;
+        
+        $routeKey = $this->routeResolver->resolveRouteKey($request, $context);
         $hashKey = sprintf('bucket_hash:%s', $routeKey);
         $bucketHash = $this->cacheHandler->get($hashKey);
-        $majorParams = $this->routeResolver->extractMajorParameters($request);
+        $majorParams = $this->routeResolver->extractMajorParameters($request, $context);
         
         if ($bucketHash !== null) {
             // Use discovered bucket hash + major parameters (like Python)
@@ -96,6 +90,6 @@ class BucketManager
         }
         
         // Fall back to route key + major parameters
-        return $this->routeResolver->getFallbackKey($request);
+        return $this->routeResolver->getFallbackKey($request, $context);
     }
 }

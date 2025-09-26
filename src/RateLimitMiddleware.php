@@ -81,50 +81,6 @@ class RateLimitMiddleware
     }
 
     /**
-     * Create a middleware instance configured for Discord API.
-     */
-    public static function discord(
-        ?CacheHandlerInterface $cacheHandler = null,
-        ?LockHandlerInterface $lockHandler = null,
-        ?LoggerInterface $logger = null,
-        int $maxRetries = 5
-    ): static {
-        return new static(
-            $cacheHandler ?? new ArrayCacheHandler(),
-            new DiscordRouteResolver(),
-            RateLimitConfig::discord(),
-            $lockHandler,
-            $logger,
-            $maxRetries,
-            true // Enable bucket hash discovery for Discord
-        );
-    }
-
-    /**
-     * Create a middleware instance configured for GitHub API.
-     */
-    public static function github(?CacheHandlerInterface $cacheHandler = null): static
-    {
-        return new static(
-            $cacheHandler ?? new ArrayCacheHandler(),
-            new DefaultRouteResolver(),
-            RateLimitConfig::github()
-        );
-    }
-
-    /**
-     * Create a middleware instance configured for Twitter API.
-     */
-    public static function twitter(?CacheHandlerInterface $cacheHandler = null): static
-    {
-        return new static(
-            $cacheHandler ?? new ArrayCacheHandler(),
-            new DefaultRouteResolver(),
-            RateLimitConfig::twitter()
-        );
-    }
-
-    /**
      * Main middleware handler - delegates to the processor.
      */
     public function __invoke(callable $handler): Closure
