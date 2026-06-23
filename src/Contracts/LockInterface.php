@@ -1,28 +1,18 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Kyzegs\GuzzleRateLimitMiddleware\Contracts;
 
 interface LockInterface
 {
     /**
-     * Block until the lock is acquired or timeout is reached.
-     * 
-     * @param int $timeout Maximum time to wait in seconds
-     * @return bool True if lock was acquired, false if timeout
+     * Acquire the lock, blocking until it becomes available.
      */
-    public function block(int $timeout = PHP_INT_MAX): bool;
+    public function acquire(): void;
 
     /**
-     * Release the lock.
-     * 
-     * @return bool True if lock was released successfully
+     * Release the lock. Safe to call even if the lock was never acquired.
      */
-    public function release(): bool;
-
-    /**
-     * Check if the lock is currently held.
-     * 
-     * @return bool
-     */
-    public function isLocked(): bool;
+    public function release(): void;
 }

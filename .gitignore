@@ -25,13 +25,10 @@ Thumbs.db
 
 # Testing
 /coverage/
-/.phpunit.cache/
 /phpunit.xml
-/phpunit.xml.dist
 
 # Static Analysis
-/.phpstan.neon
-/.phpstan.neon.dist
+/phpstan.neon
 /phpstan-baseline.neon
 
 # Logs
@@ -47,13 +44,6 @@ Thumbs.db
 .env.local
 .env.*.local
 
-# Build artifacts
-/build/
-/dist/
-
-# Documentation build
-/docs/_build/
-
 # Backup files
 *.bak
 *.backup
@@ -62,18 +52,3 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
-
-# Node.js (if using any JS tools)
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Package files
-*.tar.gz
-*.zip
-*.phar
-
-# Local development
-/local/
-/test-data/

@@ -1,15 +1,20 @@
+![Guzzle Rate Limit Middleware banner](banner.svg)
+
 # Guzzle Rate Limit Middleware
 
-A configurable Guzzle middleware that provides intelligent rate limiting based on HTTP response headers. This middleware prevents your application from hitting rate limits by automatically delaying requests when necessary.
+A configurable Guzzle middleware that prevents your application from hitting `429 Too Many Requests` by reading rate-limit response headers and delaying requests *before* they exceed the limit.
+
+State is persisted through a pluggable store, so rate limiting works **across separate requests and processes** — not just within a single operation.
 
 ## Features
 
-- 🚀 **Configurable**: Works with any API that uses standard rate limit headers
-- 🔧 **Flexible Cache Handlers**: Built-in support for array and file-based caching, with interface for custom implementations  
-- 🎯 **Route Resolution**: Intelligent grouping of requests that share rate limits
-- 📦 **Pre-configured**: Ready-to-use configurations for Discord, GitHub, and Twitter APIs
-- ⚡ **Zero 429 Responses**: Automatically delays requests to prevent rate limit errors
-- 🛡️ **Safeguards**: Built-in safety margins to account for network latency
+- 🔧 **Configurable headers** — works with any API (Discord, GitHub, Twitter, the IETF `RateLimit-*` draft, or your own).
+- 💾 **Cross-process state** — share rate-limit state via PSR-16 (Redis, Memcached, Laravel/Symfony cache), the filesystem, or in-memory.
+- ⏳ **Pre-emptive delays** — sleeps until a bucket resets instead of failing.
+- 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws.
+- 🪣 **Bucket-hash discovery** — adapts to APIs (like Discord) that assign buckets dynamically.
+- 🔒 **Optional locking** — plug in a distributed lock to serialise concurrent callers.
+- 🧪 **Fully testable** — the clock and sleeper are injectable, so timing is deterministic in tests.
 
 ## Installation
 
@@ -17,9 +22,9 @@ A configurable Guzzle middleware that provides intelligent rate limiting based o
 composer require kyzegs/guzzle-rate-limit-middleware
 ```
 
-## Quick Start
+Requires PHP 8.2+ and Guzzle 7.10+.
 
-### Basic Usage
+## Quick start
 
 ```php
 use GuzzleHttp\Client;
@@ -32,291 +37,154 @@ $stack->push(new RateLimitMiddleware());
 $client = new Client(['handler' => $stack]);
 ```
 
-### Discord API Example (Advanced Mode)
+The default middleware reads the standard `X-RateLimit-*` headers and keeps state in memory.
+
+### Per-API presets
 
 ```php
-use GuzzleHttp\Client;
-use GuzzleHttp\HandlerStack;
-use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
-use Kyzegs\GuzzleRateLimitMiddleware\CacheHandlers\FileCacheHandler;
-
-$stack = HandlerStack::create();
-$stack->push(RateLimitMiddleware::discord(new FileCacheHandler()));
-
-$client = new Client([
-    'handler' => $stack,
-    'base_uri' => 'https://discord.com/api/v10/',
-    'headers' => [
-        'Authorization' => 'Bot YOUR_BOT_TOKEN',
-        'Content-Type' => 'application/json',
-    ]
-]);
-
-// This request will be automatically rate limited with:
-// - Retries on 429 responses
-// - Bucket hash discovery
-// - Advanced Discord-specific routing
-$response = $client->get('users/@me');
+RateLimitMiddleware::github();   // X-RateLimit-* headers
+RateLimitMiddleware::twitter();  // x-rate-limit-* headers
+RateLimitMiddleware::ietf();     // RateLimit-* (IETF draft)
+RateLimitMiddleware::discord();  // Discord headers + bucket-hash discovery
 ```
 
-### GitHub API Example (Simple Mode)
+## Cross-process rate limiting
+
+To rate limit across separate requests/processes, give the middleware a persistent store. The recommended option is any PSR-16 cache:
 
 ```php
-use GuzzleHttp\Client;
-use GuzzleHttp\HandlerStack;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
-use Kyzegs\GuzzleRateLimitMiddleware\CacheHandlers\FileCacheHandler;
+use Kyzegs\GuzzleRateLimitMiddleware\Store\Psr16Store;
 
-$stack = HandlerStack::create();
-$stack->push(RateLimitMiddleware::github(new FileCacheHandler()));
-
-$client = new Client([
-    'handler' => $stack,
-    'base_uri' => 'https://api.github.com/',
-    'headers' => [
-        'Authorization' => 'token YOUR_GITHUB_TOKEN',
-        'User-Agent' => 'Your-App-Name',
-    ]
-]);
-
-// Simple rate limiting - just delays requests as needed
-$response = $client->get('user');
+$middleware = RateLimitMiddleware::github(
+    store: new Psr16Store($psr16Cache), // e.g. Redis, Laravel or Symfony cache
+);
 ```
 
-## Advanced Configuration
-
-### Custom Configuration
+Or use the zero-dependency filesystem store:
 
 ```php
+use Kyzegs\GuzzleRateLimitMiddleware\Store\FilesystemStore;
+
+$middleware = RateLimitMiddleware::github(
+    store: new FilesystemStore('/var/cache/rate-limits'),
+);
+```
+
+### Available stores
+
+| Store | Cross-process | Notes |
+|-------|---------------|-------|
+| `InMemoryStore` (default) | ❌ | Lives for the PHP process only. Good for one long-running worker and tests. |
+| `FilesystemStore` | ✅ | JSON files with atomic writes. No extra dependencies. |
+| `Psr16Store` | ✅ | Wraps any `Psr\SimpleCache\CacheInterface` — Redis, Memcached, Laravel, Symfony, … |
+
+## Custom headers
+
+Header names live in the `Headers` config object:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
-use Kyzegs\GuzzleRateLimitMiddleware\Configuration\RateLimitConfig;
-use Kyzegs\GuzzleRateLimitMiddleware\CacheHandlers\FileCacheHandler;
-use Kyzegs\GuzzleRateLimitMiddleware\RouteResolvers\DefaultRouteResolver;
 
-$config = RateLimitConfig::custom([
-    'remaining_header' => 'x-custom-remaining',
-    'limit_header' => 'x-custom-limit',
-    'safeguard_seconds' => 5,
-    'respect_retry_after' => true,
-    'bucket_hash_header' => 'x-bucket-id',  // Custom bucket hash header
-]);
-
-$middleware = RateLimitMiddleware::create(
-    cacheHandler: new FileCacheHandler('/tmp/my-cache'),
-    routeResolver: new DefaultRouteResolver(),
-    config: $config,
-    maxRetries: 2,  // Enable retries for advanced mode
-    enableBucketHashDiscovery: true  // Enable bucket hash discovery
+$headers = new Headers(
+    limit:      'X-API-Limit',
+    remaining:  'X-API-Remaining',
+    reset:      'X-API-Reset',        // absolute timestamp OR relative seconds
+    resetAfter: null,                 // relative seconds (preferred when present)
+    retryAfter: 'Retry-After',        // used for 429 retry delays
+    bucket:     null,                 // enables bucket-hash discovery when set
+    global:     null,                 // "true" indicates a global rate limit
+    scope:      null,                 // "global" indicates a global rate limit
 );
 
-$stack = HandlerStack::create();
-$stack->push($middleware);
+$middleware = RateLimitMiddleware::create(headers: $headers);
 ```
 
-### Custom Cache Handler
+`reset` values below the year-2000 epoch are treated as relative seconds; larger values as absolute UNIX timestamps.
+
+## Behaviour options
 
 ```php
-use Kyzegs\GuzzleRateLimitMiddleware\Contracts\CacheHandlerInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
+use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
 
-class RedisCacheHandler implements CacheHandlerInterface
-{
-    private $redis;
-    
-    public function __construct($redis)
-    {
-        $this->redis = $redis;
-    }
-    
-    public function get(string $key): mixed
-    {
-        $value = $this->redis->get($key);
-        return $value ? unserialize($value) : null;
-    }
-    
-    public function put(string $key, mixed $value, int $ttl): bool
-    {
-        return $this->redis->setex($key, $ttl, serialize($value));
-    }
-    
-    public function has(string $key): bool
-    {
-        return $this->redis->exists($key);
-    }
-    
-    public function forget(string $key): bool
-    {
-        return $this->redis->del($key) > 0;
-    }
-}
+$options = new Options(
+    maxRetries:          3,      // retries for a request that keeps getting 429
+    safetyBufferSeconds: 1.0,    // added to every computed delay (clock skew/latency)
+    jitterPercent:       0.0,    // random extra delay, 0-100% of the base delay
+    throwOnRateLimit:    true,   // throw once retries are exhausted on a 429
+    maxStoreTtl:         604800, // upper bound for cached bucket state (seconds)
+    retryStatusCodes:    [429],  // statuses that trigger a retry
+);
 
-// Use with middleware
-$middleware = new RateLimitMiddleware(new RedisCacheHandler($redisClient));
+$middleware = RateLimitMiddleware::create(options: $options);
+
+// Presets: Options::default(), Options::conservative(), Options::aggressive()
 ```
 
-### Custom Route Resolver
+When retries are exhausted on a `429` and `throwOnRateLimit` is `true`, a
+`Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException` is thrown
+(carrying the request, response, retry-after seconds and global flag).
+
+## Bucket resolution
+
+Requests are grouped into buckets that share a rate limit. The default
+`DefaultBucketResolver` keys by `METHOD host /path` and collapses
+identifier-like path segments — numeric ids/snowflakes, UUIDs, and long hex
+tokens — to `{id}` (so `/users/1` and `/users/2`, or two UUIDs, share a bucket).
+Human-readable slugs (e.g. `/repos/{owner}/{repo}`) are left literal because
+they're indistinguishable from route words; provide a custom resolver for APIs
+that bucket on such segments.
+
+Provide your own by implementing `BucketResolverInterface`:
 
 ```php
-use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RouteResolverInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Psr\Http\Message\RequestInterface;
 
-class CustomRouteResolver implements RouteResolverInterface
+final class MyResolver implements BucketResolverInterface
 {
-    public function resolveRouteKey(RequestInterface $request): string
+    public function resolve(RequestInterface $request): string
     {
-        // Group by API endpoint, ignoring query parameters
-        $uri = $request->getUri();
-        return sprintf('%s %s://%s%s', $request->getMethod(), $uri->getScheme(), $uri->getHost(), $uri->getPath());
-    }
-    
-    public function extractMajorParameters(RequestInterface $request): string
-    {
-        // Extract parameters that subdivide rate limit buckets
-        // For example, user_id for per-user rate limits
-        return '';
-    }
-    
-    public function getFallbackKey(RequestInterface $request): string
-    {
-        return $this->resolveRouteKey($request);
+        return $request->getMethod() . ' ' . $request->getUri()->getPath();
     }
 }
 
-$middleware = new RateLimitMiddleware(
-    cacheHandler: new FileCacheHandler(),
-    routeResolver: new CustomRouteResolver()
-);
+$middleware = RateLimitMiddleware::create(resolver: new MyResolver());
 ```
 
-## Cache Handlers
+### Bucket-hash discovery (Discord)
 
-### ArrayCacheHandler (Default)
-- Stores data in memory
-- Fast but doesn't persist between requests
-- Good for single-request rate limiting
+Some APIs assign a request to a bucket dynamically and report it via a header
+(Discord's `X-RateLimit-Bucket`). When `Headers::$bucket` is set, the middleware
+stores state under the discovered bucket and re-keys automatically if the API
+reassigns a route. `RateLimitMiddleware::discord()` enables this together with a
+`DiscordBucketResolver` that respects Discord's major parameters
+(`channel_id`, `guild_id`, `webhook_id` and `webhook_token`).
 
-### FileCacheHandler
-- Stores data in filesystem
-- Persists between requests and application restarts
-- Good for most production use cases
+## Concurrency / locking
+
+By default there is no locking. To serialise concurrent callers that share a
+bucket (e.g. multiple workers), implement `LockFactoryInterface`/`LockInterface`
+and pass the factory:
 
 ```php
-use Kyzegs\GuzzleRateLimitMiddleware\CacheHandlers\FileCacheHandler;
-
-// Default temp directory
-$handler = new FileCacheHandler();
-
-// Custom cache directory
-$handler = new FileCacheHandler('/path/to/cache/directory');
+$middleware = RateLimitMiddleware::create(lockFactory: new MyLockFactory());
 ```
 
-## Pre-configured APIs
+## Testing your integration
 
-### Discord
-- Uses Discord-specific route resolution for proper bucket handling
-- Configured for Discord's rate limit headers
-- Handles both `x-ratelimit-reset-after` and `retry-after` headers
+The clock and sleeper are injectable, so you can assert delays without real
+waits. See `tests/` — `FakeClock` and `RecordingSleeper` are good starting points.
 
-### GitHub
-- Standard rate limit headers
-- 2-second safeguard for API consistency
+## Development
 
-### Twitter
-- Twitter's specific header naming convention
-- 3-second safeguard for API reliability
-
-## How It Works
-
-1. **Bucket Resolution**: Groups requests into buckets that share rate limits
-2. **Rate Limit Check**: Checks current rate limit state for the bucket
-3. **Delay if Needed**: If rate limit is exceeded, delays the request
-4. **After Response**: Updates rate limit state from response headers
-5. **Cache Storage**: Persists rate limit state for future requests
-
-## Architecture
-
-The middleware uses a **bucket-based rate limiting system** with automatic mode detection:
-
-- **Simple Mode**: Basic rate limiting with delays (no retries, no locking)
-- **Advanced Mode**: Full featured with retries, locking, and bucket hash discovery
-- **Buckets**: Group requests that share the same rate limit
-- **Rate Limit Objects**: Track limit, remaining, and reset time for each bucket  
-- **Route Resolvers**: Extract route patterns and major parameters from requests
-- **Cache Handlers**: Persist rate limit state between requests
-
-### Mode Detection
-
-The middleware automatically chooses the appropriate mode:
-
-- **Simple Mode** when: Basic usage, no retries, no locking needed
-- **Advanced Mode** when: Retries > 0, lock handler provided, or bucket hash discovery enabled
-
-```php
-// Simple Mode
-RateLimitMiddleware::github()           // No retries
-new RateLimitMiddleware()               // Default constructor
-
-// Advanced Mode  
-RateLimitMiddleware::discord()          // Has retries + bucket discovery
-RateLimitMiddleware::create(..., maxRetries: 3)  // Custom with retries
+```bash
+composer test      # PHPUnit
+composer analyse   # PHPStan (level 6)
 ```
-
-## Rate Limit Headers Supported
-
-The middleware supports various rate limit header formats:
-
-- `x-ratelimit-remaining` / `x-rate-limit-remaining`
-- `x-ratelimit-reset` / `x-rate-limit-reset`  
-- `x-ratelimit-limit` / `x-rate-limit-limit`
-- `retry-after` / `x-ratelimit-reset-after`
-- `x-ratelimit-bucket` (configurable bucket hash header)
-- `x-ratelimit-global` (configurable global rate limit detection)
-- `x-ratelimit-scope` (configurable scope-based global detection)
-
-### Bucket Hash Discovery
-
-For APIs that use dynamic bucket systems (like Discord), you can configure bucket hash discovery:
-
-```php
-$config = RateLimitConfig::custom([
-    'bucket_hash_header' => 'x-bucket-id',  // Your API's bucket hash header
-]);
-
-$middleware = RateLimitMiddleware::create(
-    config: $config,
-    enableBucketHashDiscovery: true  // Enable the feature
-);
-```
-
-This allows the middleware to:
-- Detect when an API changes bucket assignments
-- Clear old rate limit data when buckets change
-- Adapt to dynamic bucket reorganization
-
-### Global Rate Limit Detection
-
-For APIs that have global rate limits (like Discord), you can configure header-based detection:
-
-```php
-$config = RateLimitConfig::custom([
-    'global_rate_limit_header' => 'x-ratelimit-global',  // Discord's global header
-    'rate_limit_scope_header' => 'x-ratelimit-scope',    // Discord's scope header
-    'global_scope_value' => 'global',                    // Value indicating global scope
-]);
-```
-
-Detection priority:
-1. **Global header**: `X-RateLimit-Global: true`
-2. **Scope header**: `X-RateLimit-Scope: global`  
-3. **No detection**: Assume not global if no headers configured
-
-### Retry-After Header Configuration
-
-The middleware uses only the configured `retry_after_header` for retry delays:
-
-- **Discord**: Uses `X-RateLimit-Reset-After` (most accurate)
-- **GitHub**: Uses `Retry-After` (standard HTTP header)
-- **Custom**: Use any header your API provides
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for more information.
+MIT License. See [LICENSE](LICENSE).

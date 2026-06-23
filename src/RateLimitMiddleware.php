@@ -1,109 +1,127 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Kyzegs\GuzzleRateLimitMiddleware;
 
 use Closure;
-use Kyzegs\GuzzleRateLimitMiddleware\BucketHashHandlers\BucketHashDiscovery;
-use Kyzegs\GuzzleRateLimitMiddleware\BucketHashHandlers\NullBucketHashDiscovery;
-use Kyzegs\GuzzleRateLimitMiddleware\CacheHandlers\ArrayCacheHandler;
-use Kyzegs\GuzzleRateLimitMiddleware\Configuration\RateLimitConfig;
-use Kyzegs\GuzzleRateLimitMiddleware\Contracts\CacheHandlerInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
-use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockHandlerInterface;
-use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LoggerInterface;
-use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RouteResolverInterface;
-use Kyzegs\GuzzleRateLimitMiddleware\Handlers\RateLimitHandler;
-use Kyzegs\GuzzleRateLimitMiddleware\LockHandlers\NullLockHandler;
-use Kyzegs\GuzzleRateLimitMiddleware\Loggers\NullLogger;
-use Kyzegs\GuzzleRateLimitMiddleware\RetryHandlers\NullRetryHandler;
-use Kyzegs\GuzzleRateLimitMiddleware\RetryHandlers\StandardRetryHandler;
-use Kyzegs\GuzzleRateLimitMiddleware\RouteResolvers\DefaultRouteResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Handler\RateLimitHandler;
+use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLockFactory;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\UsleepSleeper;
 use Psr\Http\Message\RequestInterface;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 /**
- * Guzzle middleware for intelligent rate limiting based on response headers.
- * 
- * This class acts as a factory and orchestrator for the actual handling logic,
- * which can be customized by providing different HandlerInterface implementations.
+ * Guzzle middleware that prevents 429s by reading rate-limit response headers
+ * and delaying requests when a bucket is exhausted. Push it onto a HandlerStack.
+ *
+ * Use the named-argument {@see create()} factory for full control, or the
+ * per-API presets ({@see discord()}, {@see github()}, {@see twitter()},
+ * {@see ietf()}).
  */
-class RateLimitMiddleware
+final class RateLimitMiddleware
 {
     private readonly HandlerInterface $handler;
 
     public function __construct(
+        Options $options = new Options(),
+        Headers $headers = new Headers(),
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?BucketResolverInterface $resolver = null,
+        ?LockFactoryInterface $lockFactory = null,
+        ?ClockInterface $clock = null,
+        ?SleeperInterface $sleeper = null,
         ?HandlerInterface $handler = null,
-        ?CacheHandlerInterface $cacheHandler = null,
-        ?RouteResolverInterface $routeResolver = null,
-        ?RateLimitConfig $config = null,
-        ?LockHandlerInterface $lockHandler = null,
-        ?LoggerInterface $logger = null,
-        int $maxRetries = 0,
-        bool $enableBucketHashDiscovery = false
     ) {
-        if ($handler !== null) {
-            $this->handler = $handler;
-            return;
-        }
+        $clock ??= new SystemClock();
 
-        // Create default handler if none provided
-        $resolvedConfig = $config ?? new RateLimitConfig();
-        
-        $bucketManager = new BucketManager(
-            $cacheHandler ?? new ArrayCacheHandler(),
-            $routeResolver ?? new DefaultRouteResolver(),
-            $resolvedConfig
-        );
-
-        $this->handler = new RateLimitHandler(
-            bucketManager: $bucketManager,
-            lockHandler: $lockHandler ?? new NullLockHandler(),
-            logger: $logger ?? new NullLogger(),
-            retryHandler: $maxRetries > 0 ? new StandardRetryHandler($maxRetries, $resolvedConfig) : new NullRetryHandler(),
-            bucketHashDiscovery: $enableBucketHashDiscovery 
-                ? new BucketHashDiscovery($bucketManager, true)
-                : new NullBucketHashDiscovery()
+        $this->handler = $handler ?? new RateLimitHandler(
+            $options,
+            $headers,
+            $store ?? new InMemoryStore($clock),
+            $logger ?? new NullLogger(),
+            $resolver ?? new DefaultBucketResolver(),
+            $lockFactory ?? new NullLockFactory(),
+            $clock,
+            $sleeper ?? new UsleepSleeper(),
         );
     }
 
     /**
-     * Create a new middleware instance with custom handler.
+     * Build a middleware with explicit, named dependencies.
      */
-    public static function create(HandlerInterface $handler): static
-    {
-        return new static($handler);
-    }
-
-    /**
-     * Create a new middleware instance with custom configuration using default handler.
-     */
-    public static function createWithDefaults(
-        CacheHandlerInterface $cacheHandler,
-        RouteResolverInterface $routeResolver,
-        RateLimitConfig $config,
-        ?LockHandlerInterface $lockHandler = null,
+    public static function create(
+        Options $options = new Options(),
+        Headers $headers = new Headers(),
+        ?StoreInterface $store = null,
         ?LoggerInterface $logger = null,
-        int $maxRetries = 0,
-        bool $enableBucketHashDiscovery = false
-    ): static {
-        return new static(
-            handler: null,
-            cacheHandler: $cacheHandler,
-            routeResolver: $routeResolver,
-            config: $config,
-            lockHandler: $lockHandler,
+        ?BucketResolverInterface $resolver = null,
+        ?LockFactoryInterface $lockFactory = null,
+        ?ClockInterface $clock = null,
+        ?SleeperInterface $sleeper = null,
+    ): self {
+        return new self(
+            options: $options,
+            headers: $headers,
+            store: $store,
             logger: $logger,
-            maxRetries: $maxRetries,
-            enableBucketHashDiscovery: $enableBucketHashDiscovery
+            resolver: $resolver,
+            lockFactory: $lockFactory,
+            clock: $clock,
+            sleeper: $sleeper,
         );
     }
 
+    public static function discord(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?LockFactoryInterface $lockFactory = null,
+        Options $options = new Options(),
+    ): self {
+        return self::create(
+            options: $options,
+            headers: Headers::discord(),
+            store: $store,
+            logger: $logger,
+            resolver: new DiscordBucketResolver(),
+            lockFactory: $lockFactory,
+        );
+    }
+
+    public static function github(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
+    {
+        return self::create(headers: Headers::github(), store: $store, logger: $logger);
+    }
+
+    public static function twitter(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
+    {
+        return self::create(headers: Headers::twitter(), store: $store, logger: $logger);
+    }
+
+    public static function ietf(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
+    {
+        return self::create(headers: Headers::ietf(), store: $store, logger: $logger);
+    }
+
     /**
-     * Main middleware handler - delegates to the handler.
+     * Guzzle middleware entry point.
      */
     public function __invoke(callable $handler): Closure
     {
-        return function (RequestInterface $request, array $options) use ($handler) {
-            return $this->handler->handle($handler, $request, $options);
-        };
+        return fn (RequestInterface $request, array $options) => $this->handler->handle($handler, $request, $options);
     }
 }

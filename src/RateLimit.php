@@ -1,138 +1,130 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Kyzegs\GuzzleRateLimitMiddleware;
 
-use Kyzegs\GuzzleRateLimitMiddleware\Configuration\RateLimitConfig;
-use Kyzegs\GuzzleRateLimitMiddleware\Utilities\HeaderParser;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
 use Psr\Http\Message\ResponseInterface;
 
 /**
- * Represents the rate limit state for a specific route/bucket.
- * Based on Discord's rate limiting model but made generic.
+ * Immutable snapshot of the rate-limit state for a single bucket.
+ *
+ * Pure value object: it never sleeps and never touches the wall clock except
+ * through the injected {@see ClockInterface}, which keeps it fully testable.
+ * It serialises to/from a plain array so it can live in any {@see Contracts\StoreInterface}.
  */
-class RateLimit
+final class RateLimit
 {
-    private int $limit = 1;
-    private int $remaining = 1;
-    private float $resetAfter = 0.0;
-    private float $reset = 0.0;
-    private bool $dirty = false;
-
-    public function getLimit(): int
-    {
-        return $this->limit;
+    /**
+     * @param int        $limit      Total requests allowed in the window.
+     * @param int        $remaining  Requests left in the current window.
+     * @param float      $reset      Absolute UNIX timestamp at which the window resets.
+     * @param string|null $bucketHash The API-provided bucket identifier, if any.
+     */
+    public function __construct(
+        public readonly int $limit = 0,
+        public readonly int $remaining = 0,
+        public readonly float $reset = 0.0,
+        public readonly ?string $bucketHash = null,
+    ) {
     }
 
-    public function getRemaining(): int
+    /**
+     * Build a snapshot from a response using the configured header names.
+     */
+    public static function fromResponse(ResponseInterface $response, Headers $headers, ClockInterface $clock): self
     {
-        return $this->remaining;
+        $now = $clock->now();
+
+        $limit = (int) HeaderParser::value($response, $headers->limit, 0);
+        $remaining = (int) HeaderParser::value($response, $headers->remaining, 0);
+        $bucketHash = HeaderParser::value($response, $headers->bucket);
+
+        return new self(
+            limit: $limit,
+            remaining: $remaining,
+            reset: self::resolveReset($response, $headers, $now),
+            bucketHash: $bucketHash !== null ? (string) $bucketHash : null,
+        );
     }
 
-    public function getResetAfter(): float
+    /**
+     * @param array{limit?: int, remaining?: int, reset?: float|int, bucketHash?: string|null} $data
+     */
+    public static function fromArray(array $data): self
     {
-        if ($this->reset > 0.0) {
-            return max(0.0, $this->reset - microtime(true));
+        return new self(
+            limit: (int) ($data['limit'] ?? 0),
+            remaining: (int) ($data['remaining'] ?? 0),
+            reset: (float) ($data['reset'] ?? 0.0),
+            bucketHash: $data['bucketHash'] ?? null,
+        );
+    }
+
+    /**
+     * @return array{limit: int, remaining: int, reset: float, bucketHash: string|null}
+     */
+    public function toArray(): array
+    {
+        return [
+            'limit' => $this->limit,
+            'remaining' => $this->remaining,
+            'reset' => $this->reset,
+            'bucketHash' => $this->bucketHash,
+        ];
+    }
+
+    /**
+     * Whether a request should wait before being sent: the bucket is exhausted
+     * and the window has not yet reset.
+     */
+    public function shouldDelay(ClockInterface $clock): bool
+    {
+        return $this->remaining <= 0 && $this->secondsUntilReset($clock) > 0.0;
+    }
+
+    /**
+     * Seconds until the window resets (never negative).
+     */
+    public function secondsUntilReset(ClockInterface $clock): float
+    {
+        return max(0.0, $this->reset - $clock->now());
+    }
+
+    /**
+     * Resolve the absolute reset timestamp from whichever headers are present,
+     * in order of accuracy: relative reset-after, then absolute/relative reset,
+     * then retry-after. Returns 0.0 when nothing usable is found.
+     */
+    private static function resolveReset(ResponseInterface $response, Headers $headers, float $now): float
+    {
+        $resetAfter = HeaderParser::value($response, $headers->resetAfter);
+        if ($resetAfter !== null) {
+            return $now + (float) $resetAfter;
         }
 
-        return $this->resetAfter;
-    }
-
-    public function getReset(): float
-    {
-        return $this->reset;
-    }
-
-    public function isDirty(): bool
-    {
-        return $this->dirty;
-    }
-
-    /**
-     * Reset the rate limit state (when limit resets).
-     */
-    public function reset(): void
-    {
-        $this->remaining = $this->limit;
-        $this->resetAfter = 0.0;
-        $this->dirty = false;
-    }
-
-    /**
-     * Set a retry-after delay (usually from 429 responses).
-     */
-    public function retry(float $retryAfter): static
-    {
-        $this->remaining = 0;
-        $this->resetAfter = $retryAfter;
-        $this->reset = microtime(true) + $retryAfter;
-        $this->dirty = true;
-
-        return $this;
-    }
-
-    /**
-     * Update rate limit state from response headers.
-     */
-    public function updateFromResponse(ResponseInterface $response, RateLimitConfig $config): static
-    {
-        $limit = (int) HeaderParser::getHeaderValue($response, $config->limitHeader, 1);
-        $remaining = (int) HeaderParser::getHeaderValue($response, $config->remainingHeader, 0);
-        $resetAfter = (float) HeaderParser::getHeaderValue($response, $config->retryAfterHeader, 0.0);
-        $reset = HeaderParser::getHeaderValue($response, $config->resetHeader);
-
-        $this->limit = $limit;
-        
+        $reset = HeaderParser::value($response, $headers->reset);
         if ($reset !== null) {
-            $this->reset = $this->parseResetTime((string) $reset);
+            return self::normaliseTimestamp((float) $reset, $now);
         }
 
-        if ($this->dirty) {
-            $this->remaining = min($remaining, $this->limit);
-        } else {
-            $this->remaining = $remaining;
-            $this->dirty = true;
+        $retryAfter = HeaderParser::value($response, $headers->retryAfter);
+        if ($retryAfter !== null) {
+            return $now + (float) $retryAfter;
         }
 
-        if ($resetAfter > 0.0) {
-            $this->resetAfter = $resetAfter;
-        } elseif ($this->reset > 0.0) {
-            $this->resetAfter = max(0.0, $this->reset - microtime(true));
-        }
-
-        return $this;
+        return 0.0;
     }
 
     /**
-     * Check if we should delay the next request.
+     * Treat values below the year-2000 epoch as relative seconds, otherwise as
+     * an absolute UNIX timestamp.
      */
-    public function shouldDelay(): bool
+    private static function normaliseTimestamp(float $value, float $now): float
     {
-        return $this->remaining <= 0 && $this->getResetAfter() > 0;
-    }
-
-    /**
-     * Get the delay time in seconds.
-     */
-    public function getDelay(): ?float
-    {
-        if (!$this->shouldDelay()) {
-            return null;
-        }
-
-        return $this->getResetAfter();
-    }
-
-
-    private function parseResetTime(string $resetValue): float
-    {
-        $resetTime = (float) $resetValue;
-        
-        // If the value is less than a reasonable timestamp (e.g., less than year 2000),
-        // assume it's relative seconds from now
-        if ($resetTime < 946684800) { // January 1, 2000
-            $resetTime = microtime(true) + $resetTime;
-        }
-        
-        return $resetTime;
+        return $value < 946684800.0 ? $now + $value : $value;
     }
 }

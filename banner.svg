@@ -1,0 +1,77 @@
+<svg width="1680" height="384" viewBox="0 0 1680 384" fill="none" xmlns="http://www.w3.org/2000/svg" font-family="'SF Pro Display','Segoe UI',Inter,system-ui,-apple-system,sans-serif">
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a1413"/>
+      <stop offset="1" stop-color="#050a09"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="#14b8a6" stop-opacity="0.55"/>
+      <stop offset="0.45" stop-color="#0d9488" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#0d9488" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+    <pattern id="dots" width="14" height="14" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.4" fill="#0f2b27"/>
+    </pattern>
+    <linearGradient id="dotfadegrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff"/>
+      <stop offset="0.5" stop-color="#fff"/>
+      <stop offset="0.6" stop-color="#000"/>
+    </linearGradient>
+    <mask id="dotfade"><rect x="40" y="320" width="1600" height="40" fill="url(#dotfadegrad)"/></mask>
+    <clipPath id="round"><rect x="8" y="8" width="1664" height="368" rx="28"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#round)">
+    <rect x="8" y="8" width="1664" height="368" fill="url(#surface)"/>
+    <rect x="8" y="8" width="1664" height="368" fill="url(#glow)"/>
+
+    <rect x="8" y="300" width="1664" height="76" fill="#060d0c"/>
+    <rect x="8" y="300" width="1664" height="1" fill="#143029"/>
+    <rect x="40" y="320" width="1600" height="40" fill="url(#dots)" mask="url(#dotfade)"/>
+
+    <rect x="1300" y="298" width="372" height="3" fill="url(#accent)"/>
+
+    <!-- PHP watermark -->
+    <g transform="translate(1415,65) scale(7.1)" opacity="0.06">
+      <path fill="#ffffff" d="M7.01 10.207h-.944l-.515 2.648h.838c.556 0 .97-.105 1.242-.314.272-.21.455-.559.55-1.049.092-.47.05-.802-.124-.995-.175-.193-.523-.29-1.047-.29zM12 5.688C5.373 5.688 0 8.514 0 12s5.373 6.313 12 6.313S24 15.486 24 12c0-3.486-5.373-6.312-12-6.312zm-3.26 7.451c-.261.25-.575.438-.917.551-.336.108-.765.164-1.285.164H5.357l-.327 1.681H3.652l1.23-6.326h2.65c.797 0 1.378.209 1.744.628.366.418.476 1.002.33 1.752a2.836 2.836 0 0 1-.305.847c-.143.255-.33.49-.561.703zm4.024.715l.543-2.799c.063-.318.039-.536-.068-.651-.107-.116-.336-.174-.687-.174H11.46l-.704 3.625H9.388l1.23-6.327h1.367l-.327 1.682h1.218c.767 0 1.295.134 1.586.401s.378.7.263 1.299l-.572 2.944h-1.389zm7.597-2.265a2.782 2.782 0 0 1-.305.847c-.143.255-.33.49-.561.703a2.44 2.44 0 0 1-.917.551c-.336.108-.765.164-1.286.164h-1.18l-.327 1.682h-1.378l1.23-6.326h2.649c.797 0 1.378.209 1.744.628.366.417.477 1.001.331 1.751zM17.766 10.207h-.943l-.516 2.648h.838c.557 0 .971-.105 1.242-.314.272-.21.455-.559.551-1.049.092-.47.049-.802-.125-.995s-.524-.29-1.047-.29z"/>
+    </g>
+
+    <!-- Icon tile: funnel (many requests in, throttled drip out) -->
+    <g transform="translate(108,86)">
+      <rect width="128" height="128" rx="30" fill="url(#tile)"/>
+      <rect width="128" height="128" rx="30" fill="#ffffff" opacity="0.06"/>
+      <!-- incoming requests -->
+      <g fill="#ffffff">
+        <circle cx="48" cy="30" r="4.5"/>
+        <circle cx="64" cy="30" r="4.5"/>
+        <circle cx="80" cy="30" r="4.5"/>
+      </g>
+      <!-- funnel -->
+      <path d="M30 48 H98 L72 80 V94 H56 V80 Z" fill="none" stroke="#ffffff" stroke-width="6.5" stroke-linejoin="round" stroke-linecap="round"/>
+      <!-- throttled drip -->
+      <circle cx="64" cy="110" r="5" fill="#ffffff"/>
+    </g>
+
+    <!-- Title -->
+    <g transform="translate(288,0)">
+      <text x="0" y="158" font-size="76" font-weight="800" fill="#e6fbf6" letter-spacing="-1.5">Rate Limit Middleware</text>
+      <text x="2" y="214" font-size="34" font-weight="600" fill="#5eead4" letter-spacing="0.5">Guzzle &#183; HTTP Rate Limiting</text>
+    </g>
+
+    <!-- Footer: PHP mark + repo URL -->
+    <g transform="translate(1144,326)">
+      <path transform="scale(1.16)" fill="#6fa39a" d="M7.01 10.207h-.944l-.515 2.648h.838c.556 0 .97-.105 1.242-.314.272-.21.455-.559.55-1.049.092-.47.05-.802-.124-.995-.175-.193-.523-.29-1.047-.29zM12 5.688C5.373 5.688 0 8.514 0 12s5.373 6.313 12 6.313S24 15.486 24 12c0-3.486-5.373-6.312-12-6.312zm-3.26 7.451c-.261.25-.575.438-.917.551-.336.108-.765.164-1.285.164H5.357l-.327 1.681H3.652l1.23-6.326h2.65c.797 0 1.378.209 1.744.628.366.418.476 1.002.33 1.752a2.836 2.836 0 0 1-.305.847c-.143.255-.33.49-.561.703zm4.024.715l.543-2.799c.063-.318.039-.536-.068-.651-.107-.116-.336-.174-.687-.174H11.46l-.704 3.625H9.388l1.23-6.327h1.367l-.327 1.682h1.218c.767 0 1.295.134 1.586.401s.378.7.263 1.299l-.572 2.944h-1.389zm7.597-2.265a2.782 2.782 0 0 1-.305.847c-.143.255-.33.49-.561.703a2.44 2.44 0 0 1-.917.551c-.336.108-.765.164-1.286.164h-1.18l-.327 1.682h-1.378l1.23-6.326h2.649c.797 0 1.378.209 1.744.628.366.417.477 1.001.331 1.751zM17.766 10.207h-.943l-.516 2.648h.838c.557 0 .971-.105 1.242-.314.272-.21.455-.559.551-1.049.092-.47.049-.802-.125-.995s-.524-.29-1.047-.29z"/>
+      <text x="41" y="22" font-size="20" font-weight="600" fill="#6fa39a" letter-spacing="0.2">github.com/kyzegs/guzzle-rate-limit-middleware</text>
+    </g>
+  </g>
+
+  <rect x="8.5" y="8.5" width="1663" height="367" rx="27.5" fill="none" stroke="#ffffff" stroke-opacity="0.07"/>
+</svg>
