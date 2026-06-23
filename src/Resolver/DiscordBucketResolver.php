@@ -51,7 +51,16 @@ final class DiscordBucketResolver implements BucketResolverInterface, MajorParam
             }
         }
 
-        return sprintf('%s /%s', strtoupper($request->getMethod()), implode('/', $template));
+        $key = sprintf('%s /%s', strtoupper($request->getMethod()), implode('/', $template));
+
+        if ($request->getMethod() === 'DELETE' && preg_match('#/channels/\d+/messages/(\d+)$#', $request->getUri()->getPath(), $matches) === 1) {
+            $timestamp = (((int) $matches[1]) >> 22) + 1420070400000;
+            if ((int) floor(microtime(true) * 1000) - $timestamp > 1_209_600_000) {
+                $key .= ':delete-old-message';
+            }
+        }
+
+        return $key;
     }
 
     public function majorParameters(RequestInterface $request): string

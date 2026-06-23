@@ -70,14 +70,12 @@ final class BucketKeyResolver
 
     private function bucketKey(string $bucketHash, string $major): string
     {
-        return $major === ''
-            ? sprintf('bucket:%s', $bucketHash)
-            : sprintf('bucket:%s:%s', $bucketHash, $major);
+        return 'bucket:' . hash('sha256', $bucketHash . "\0" . $major);
     }
 
     private function fallbackKey(string $routeKey, string $major): string
     {
-        return $major === '' ? $routeKey : sprintf('%s:%s', $routeKey, $major);
+        return 'route:' . hash('sha256', $routeKey . "\0" . $major);
     }
 
     private function mapKey(string $routeKey): string

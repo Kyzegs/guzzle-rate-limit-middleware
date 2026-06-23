@@ -6,20 +6,27 @@ namespace Kyzegs\GuzzleRateLimitMiddleware;
 
 use Closure;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\InvalidRequestLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\IdentityResolverInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Handler\RateLimitHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\UsleepSleeper;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
 use Psr\Http\Message\RequestInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -46,6 +53,8 @@ final class RateLimitMiddleware
         ?ClockInterface $clock = null,
         ?SleeperInterface $sleeper = null,
         ?HandlerInterface $handler = null,
+        ?IdentityResolverInterface $identityResolver = null,
+        ?RetryAfterResolverInterface $retryAfterResolver = null,
     ) {
         $clock ??= new SystemClock();
 
@@ -58,6 +67,8 @@ final class RateLimitMiddleware
             $lockFactory ?? new NullLockFactory(),
             $clock,
             $sleeper ?? new UsleepSleeper(),
+            $identityResolver ?? new AuthorizationIdentityResolver(),
+            $retryAfterResolver ?? new DefaultRetryAfterResolver(),
         );
     }
 
@@ -73,6 +84,8 @@ final class RateLimitMiddleware
         ?LockFactoryInterface $lockFactory = null,
         ?ClockInterface $clock = null,
         ?SleeperInterface $sleeper = null,
+        ?IdentityResolverInterface $identityResolver = null,
+        ?RetryAfterResolverInterface $retryAfterResolver = null,
     ): self {
         return new self(
             options: $options,
@@ -83,6 +96,8 @@ final class RateLimitMiddleware
             lockFactory: $lockFactory,
             clock: $clock,
             sleeper: $sleeper,
+            identityResolver: $identityResolver,
+            retryAfterResolver: $retryAfterResolver,
         );
     }
 
@@ -90,7 +105,7 @@ final class RateLimitMiddleware
         ?StoreInterface $store = null,
         ?LoggerInterface $logger = null,
         ?LockFactoryInterface $lockFactory = null,
-        Options $options = new Options(),
+        Options $options = new Options(globalLimit: new GlobalLimit(), invalidRequestLimit: new InvalidRequestLimit()),
     ): self {
         return self::create(
             options: $options,
@@ -99,6 +114,8 @@ final class RateLimitMiddleware
             logger: $logger,
             resolver: new DiscordBucketResolver(),
             lockFactory: $lockFactory,
+            identityResolver: new AuthorizationIdentityResolver(),
+            retryAfterResolver: new DiscordRetryAfterResolver(),
         );
     }
 

@@ -25,6 +25,9 @@ final class Options
         public readonly bool $throwOnRateLimit = true,
         public readonly int $maxStoreTtl = 604800, // 7 days
         public readonly array $retryStatusCodes = [429],
+        public readonly ?GlobalLimit $globalLimit = null,
+        public readonly ?InvalidRequestLimit $invalidRequestLimit = null,
+        public readonly ?float $maxDelaySeconds = null,
     ) {
     }
 

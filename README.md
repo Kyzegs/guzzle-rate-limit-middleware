@@ -48,6 +48,28 @@ RateLimitMiddleware::ietf();     // RateLimit-* (IETF draft)
 RateLimitMiddleware::discord();  // Discord headers + bucket-hash discovery
 ```
 
+The Discord preset also enables a cross-process 50 request/second global
+budget, isolates all state by a one-way authorization fingerprint, accepts the
+JSON `retry_after` fallback, and stops at 9,000 invalid requests per 10 minutes
+before Discord's Cloudflare threshold. These values are configurable through
+`Options`:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\InvalidRequestLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
+
+$middleware = RateLimitMiddleware::discord(options: new Options(
+    globalLimit: new GlobalLimit(maxRequests: 50, windowSeconds: 1),
+    invalidRequestLimit: new InvalidRequestLimit(maxRequests: 9000, windowSeconds: 600),
+    maxDelaySeconds: 120,
+));
+```
+
+Raw authorization and webhook tokens never appear in persisted bucket or lock
+keys. Interaction callback endpoints are excluded from Discord's bot-global
+budget. Shared-scope 429 responses do not consume the invalid-request budget.
+
 ## Cross-process rate limiting
 
 To rate limit across separate requests/processes, give the middleware a persistent store. The recommended option is any PSR-16 cache:

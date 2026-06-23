@@ -7,6 +7,7 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Tests\Handler;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
@@ -17,6 +18,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLockFactory;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\FakeClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RecordingSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyLockFactory;
@@ -114,6 +116,98 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertEqualsWithDelta(5.0, $this->sleeper->sleeps[0], 0.001); // 4 + 1 buffer
     }
 
+    public function test_discord_retry_after_falls_back_to_json_without_consuming_body(): void
+    {
+        $handler = new RateLimitHandler(
+            new Options(maxRetries: 1, safetyBufferSeconds: 0),
+            Headers::discord(),
+            $this->store(),
+            new NullLogger(),
+            new DiscordBucketResolver(),
+            new NullLockFactory(),
+            $this->clock,
+            $this->sleeper,
+            retryAfterResolver: new DiscordRetryAfterResolver(),
+        );
+
+        $response = $handler->handle(
+            $this->queue(
+                new Response(429, ['Content-Type' => 'application/json'], '{"retry_after":2.5,"global":false}'),
+                new Response(200, [], '{"ok":true}'),
+            ),
+            new Request('GET', 'https://discord.com/api/v10/users/@me'),
+            [],
+        );
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertEqualsWithDelta(2.5, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_global_budget_is_shared_across_routes_for_same_identity(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            safetyBufferSeconds: 0,
+            globalLimit: new GlobalLimit(maxRequests: 2, windowSeconds: 1),
+        ));
+        $respond = $this->responder(new Response(200, ['X-RateLimit-Remaining' => '10']));
+
+        $handler->handle($respond, new Request('GET', 'https://api.test/one', ['Authorization' => 'Bot secret']), []);
+        $handler->handle($respond, new Request('GET', 'https://api.test/two', ['Authorization' => 'Bot secret']), []);
+        $handler->handle($respond, new Request('GET', 'https://api.test/three', ['Authorization' => 'Bot secret']), []);
+
+        $this->assertSame(1, $this->sleeper->count());
+        $this->assertEqualsWithDelta(1.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_global_budget_isolated_by_authorization_identity(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            safetyBufferSeconds: 0,
+            globalLimit: new GlobalLimit(maxRequests: 1, windowSeconds: 1),
+        ));
+        $respond = $this->responder(new Response(200, ['X-RateLimit-Remaining' => '10']));
+
+        $handler->handle($respond, new Request('GET', 'https://api.test/users', ['Authorization' => 'Bot first']), []);
+        $handler->handle($respond, new Request('GET', 'https://api.test/users', ['Authorization' => 'Bearer second']), []);
+
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_json_global_429_blocks_other_routes(): void
+    {
+        $store = $this->store();
+        $options = new Options(maxRetries: 0, safetyBufferSeconds: 0, globalLimit: new GlobalLimit());
+        $handler = new RateLimitHandler(
+            $options,
+            Headers::discord(),
+            $store,
+            new NullLogger(),
+            new DiscordBucketResolver(),
+            new NullLockFactory(),
+            $this->clock,
+            $this->sleeper,
+            retryAfterResolver: new DiscordRetryAfterResolver(),
+        );
+
+        try {
+            $handler->handle(
+                $this->responder(new Response(429, ['Content-Type' => 'application/json'], '{"retry_after":2,"global":true}')),
+                new Request('GET', 'https://discord.com/api/v10/channels/1', ['Authorization' => 'Bot secret']),
+                [],
+            );
+        } catch (RateLimitExceededException) {
+        }
+
+        $handler->handle(
+            $this->responder(new Response(200, ['X-RateLimit-Remaining' => '1'])),
+            new Request('GET', 'https://discord.com/api/v10/guilds/2', ['Authorization' => 'Bot secret']),
+            [],
+        );
+
+        $this->assertSame(1, $this->sleeper->count());
+        $this->assertEqualsWithDelta(2.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
     public function test_throws_after_retries_exhausted(): void
     {
         $handler = $this->handler($this->store(), new Options(maxRetries: 1));
@@ -156,7 +250,7 @@ final class RateLimitHandlerTest extends TestCase
         );
 
         $this->assertNotNull(
-            $store->get('bucket:abcd:channel_id=123'),
+            $store->get('bucket:' . hash('sha256', "abcd\0channel_id=123")),
             'State should be stored under the discovered bucket key.',
         );
     }

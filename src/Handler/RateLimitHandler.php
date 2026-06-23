@@ -11,12 +11,18 @@ use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\IdentityResolverInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\MajorParameterAwareInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
+use Kyzegs\GuzzleRateLimitMiddleware\Exception\InvalidRequestLimitExceededException;
+use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\BucketKeyResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
 use Psr\Http\Message\RequestInterface;
@@ -47,6 +53,8 @@ final class RateLimitHandler implements HandlerInterface
         private readonly LockFactoryInterface $lockFactory,
         private readonly ClockInterface $clock,
         private readonly SleeperInterface $sleeper,
+        private readonly IdentityResolverInterface $identityResolver = new AuthorizationIdentityResolver(),
+        private readonly RetryAfterResolverInterface $retryAfterResolver = new DefaultRetryAfterResolver(),
     ) {
         $this->bucketKeys = new BucketKeyResolver($this->store);
     }
@@ -56,7 +64,9 @@ final class RateLimitHandler implements HandlerInterface
      */
     public function handle(callable $handler, RequestInterface $request, array $options): mixed
     {
-        $routeKey = $this->resolver->resolve($request);
+        $identity = $this->identityResolver->resolve($request);
+        $this->enforceInvalidBudget($identity);
+        $routeKey = $identity . ':' . $this->resolver->resolve($request);
         $major = $this->resolver instanceof MajorParameterAwareInterface
             ? $this->resolver->majorParameters($request)
             : '';
@@ -70,12 +80,15 @@ final class RateLimitHandler implements HandlerInterface
 
             while (true) {
                 $this->delayIfNeeded($effectiveKey);
+                $this->reserveGlobalCapacity($request, $identity);
 
                 $promise = $handler($request, $options);
                 $isPromise = $promise instanceof PromiseInterface;
                 $response = $isPromise ? $promise->wait() : $promise;
 
                 $effectiveKey = $this->persist($response, $routeKey, $major, $effectiveKey);
+                $this->recordGlobalLimit($response, $identity);
+                $this->recordInvalidRequest($response, $identity);
 
                 if ($this->shouldRetry($response, $tries)) {
                     $this->sleepForRetry($request, $response, ++$tries);
@@ -184,13 +197,7 @@ final class RateLimitHandler implements HandlerInterface
      */
     private function retryAfter(ResponseInterface $response): float
     {
-        $retryAfter = HeaderParser::value($response, $this->headers->retryAfter);
-        if ($retryAfter !== null) {
-            return (float) $retryAfter;
-        }
-
-        return RateLimit::fromResponse($response, $this->headers, $this->clock)
-            ->secondsUntilReset($this->clock);
+        return $this->retryAfterResolver->resolve($response, $this->headers, $this->clock);
     }
 
     private function isGlobal(ResponseInterface $response): bool
@@ -201,6 +208,18 @@ final class RateLimitHandler implements HandlerInterface
         }
 
         $scope = HeaderParser::value($response, $this->headers->scope);
+
+        if ($scope === null) {
+            $body = $response->getBody();
+            $position = $body->isSeekable() ? $body->tell() : null;
+            $decoded = json_decode((string) $body, true);
+            if ($position !== null) {
+                $body->seek($position);
+            }
+            if (is_array($decoded) && ($decoded['global'] ?? false) === true) {
+                return true;
+            }
+        }
 
         return $scope !== null && strtolower((string) $scope) === 'global';
     }
@@ -213,7 +232,101 @@ final class RateLimitHandler implements HandlerInterface
             $delay += $delay * ($this->options->jitterPercent / 100.0) * (mt_rand() / mt_getrandmax());
         }
 
+        if ($this->options->maxDelaySeconds !== null && $delay > $this->options->maxDelaySeconds) {
+            throw new RateLimitDelayExceededException($delay);
+        }
+
         return $delay;
+    }
+
+    private function reserveGlobalCapacity(RequestInterface $request, string $identity): void
+    {
+        $config = $this->options->globalLimit;
+        if ($config === null || $this->isInteractionCallback($request)) {
+            return;
+        }
+
+        $key = 'global:' . hash('sha256', $identity);
+        while (true) {
+            $lock = $this->lockFactory->make($key);
+            $lock->acquire();
+            $delay = 0.0;
+            try {
+                $now = $this->clock->now();
+                $state = $this->store->get($key) ?? [];
+                $reset = (float) ($state['reset'] ?? 0.0);
+                $blockedUntil = (float) ($state['blocked_until'] ?? 0.0);
+                if ($blockedUntil > $now) {
+                    $delay = $blockedUntil - $now;
+                } else {
+                    $count = $reset > $now ? (int) ($state['count'] ?? 0) : 0;
+                    $reset = $reset > $now ? $reset : $now + $config->windowSeconds;
+                    if ($count >= $config->maxRequests) {
+                        $delay = $reset - $now;
+                    } else {
+                        $this->store->put($key, ['count' => $count + 1, 'reset' => $reset], (int) ceil($config->windowSeconds) + 1);
+                        return;
+                    }
+                }
+            } finally {
+                $lock->release();
+            }
+            $this->sleeper->sleep($this->withMargin($delay));
+        }
+    }
+
+    private function recordGlobalLimit(ResponseInterface $response, string $identity): void
+    {
+        if (! $this->isGlobal($response)) {
+            return;
+        }
+        $delay = $this->retryAfter($response);
+        $key = 'global:' . hash('sha256', $identity);
+        $this->store->put($key, ['count' => PHP_INT_MAX, 'reset' => $this->clock->now() + $delay, 'blocked_until' => $this->clock->now() + $delay], (int) ceil($delay) + 1);
+    }
+
+    private function enforceInvalidBudget(string $identity): void
+    {
+        $config = $this->options->invalidRequestLimit;
+        if ($config === null) {
+            return;
+        }
+        $state = $this->store->get('invalid:' . hash('sha256', $identity));
+        if ($state !== null && (int) ($state['count'] ?? 0) >= $config->maxRequests && (float) ($state['reset'] ?? 0.0) > $this->clock->now()) {
+            throw new InvalidRequestLimitExceededException((float) $state['reset'] - $this->clock->now());
+        }
+    }
+
+    private function recordInvalidRequest(ResponseInterface $response, string $identity): void
+    {
+        $config = $this->options->invalidRequestLimit;
+        $status = $response->getStatusCode();
+        if ($config === null || ! in_array($status, $config->statusCodes, true) || ($status === 429 && $this->scope($response) === 'shared')) {
+            return;
+        }
+        $key = 'invalid:' . hash('sha256', $identity);
+        $lock = $this->lockFactory->make($key);
+        $lock->acquire();
+        try {
+            $now = $this->clock->now();
+            $state = $this->store->get($key) ?? [];
+            $reset = (float) ($state['reset'] ?? 0.0);
+            $count = $reset > $now ? (int) ($state['count'] ?? 0) : 0;
+            $reset = $reset > $now ? $reset : $now + $config->windowSeconds;
+            $this->store->put($key, ['count' => $count + 1, 'reset' => $reset], (int) ceil($config->windowSeconds) + 1);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function scope(ResponseInterface $response): string
+    {
+        return strtolower((string) HeaderParser::value($response, $this->headers->scope, 'user'));
+    }
+
+    private function isInteractionCallback(RequestInterface $request): bool
+    {
+        return preg_match('#/interactions/[^/]+/[^/]+/callback$#', $request->getUri()->getPath()) === 1;
     }
 
     private function ttlFor(RateLimit $rateLimit): int
