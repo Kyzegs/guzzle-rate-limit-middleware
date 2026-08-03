@@ -187,13 +187,23 @@ reassigns a route. `RateLimitMiddleware::discord()` enables this together with a
 
 ## Concurrency / locking
 
-By default there is no locking. To serialise concurrent callers that share a
+By default there is no locking. To coordinate concurrent callers that share a
 bucket (e.g. multiple workers), implement `LockFactoryInterface`/`LockInterface`
 and pass the factory:
 
 ```php
 $middleware = RateLimitMiddleware::create(lockFactory: new MyLockFactory());
 ```
+
+The lock covers the bookkeeping, not the request. A caller takes a slot out of
+the bucket's remaining allowance and releases the lock before sending, so a
+bucket runs as many requests in parallel as it has capacity for. The lock is
+only held across a round trip when the allowance is still unknown — the first
+request on a bucket, and the first after a window resets, goes alone because
+nothing else can reveal the new limit.
+
+This means a lock wait timeout signals genuine contention on an unknown bucket,
+not ordinary throughput.
 
 ## Testing your integration
 

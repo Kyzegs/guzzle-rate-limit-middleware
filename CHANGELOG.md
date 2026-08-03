@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0
+
+- Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.
+- Keep the lowest `remaining` seen within a window, so out-of-order responses cannot hand back spent capacity.
+
 ## 1.1.0
 
 - Add credential-isolated Discord bucket state with opaque cache and lock keys.

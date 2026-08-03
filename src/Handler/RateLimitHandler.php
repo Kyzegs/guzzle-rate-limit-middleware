@@ -14,6 +14,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\IdentityResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\MajorParameterAwareInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
@@ -72,14 +73,12 @@ final class RateLimitHandler implements HandlerInterface
             : '';
         $effectiveKey = $this->bucketKeys->effective($routeKey, $major);
 
-        $lock = $this->lockFactory->make($effectiveKey);
-        $lock->acquire();
+        $tries = 0;
 
-        try {
-            $tries = 0;
+        while (true) {
+            $probe = $this->reserveBucketCapacity($effectiveKey);
 
-            while (true) {
-                $this->delayIfNeeded($effectiveKey);
+            try {
                 $this->reserveGlobalCapacity($request, $identity);
 
                 $promise = $handler($request, $options);
@@ -89,46 +88,83 @@ final class RateLimitHandler implements HandlerInterface
                 $effectiveKey = $this->persist($response, $routeKey, $major, $effectiveKey);
                 $this->recordGlobalLimit($response, $identity);
                 $this->recordInvalidRequest($response, $identity);
-
-                if ($this->shouldRetry($response, $tries)) {
-                    $this->sleepForRetry($request, $response, ++$tries);
-
-                    continue;
-                }
-
-                $this->throwIfRateLimited($request, $response);
-
-                return $isPromise ? Create::promiseFor($response) : $response;
+            } finally {
+                $probe?->release();
             }
-        } finally {
-            $lock->release();
+
+            if ($this->shouldRetry($response, $tries)) {
+                $this->sleepForRetry($request, $response, ++$tries);
+
+                continue;
+            }
+
+            $this->throwIfRateLimited($request, $response);
+
+            return $isPromise ? Create::promiseFor($response) : $response;
         }
     }
 
     /**
-     * Sleep if the stored bucket state says the next request must wait.
+     * Claim a slot in the bucket, sleeping until the window resets when it is
+     * already spent.
+     *
+     * The lock covers the reservation only, never the request: the API allows
+     * as many requests in flight as the bucket has remaining, so holding it
+     * across the round trip would cap every bucket at one concurrent request
+     * and make waiters time out under any fan-out.
+     *
+     * Returns the still-held lock when the allowance is unknown — nothing can
+     * be reserved until a response reveals it, so that one request goes alone
+     * and the caller releases the lock once it has landed.
      */
-    private function delayIfNeeded(string $effectiveKey): void
+    private function reserveBucketCapacity(string $effectiveKey): ?LockInterface
     {
-        $stored = $this->store->get($effectiveKey);
-        if ($stored === null) {
-            return;
+        $slept = false;
+
+        while (true) {
+            $lock = $this->lockFactory->make($effectiveKey);
+            $lock->acquire();
+
+            $keepLock = false;
+
+            try {
+                $stored = $this->store->get($effectiveKey);
+                $rateLimit = $stored === null ? null : RateLimit::fromArray($stored);
+
+                // Unknown allowance, or one that has already been waited out:
+                // only a response can reveal the new window, so go alone.
+                if ($rateLimit === null || $slept || $rateLimit->secondsUntilReset($this->clock) <= 0.0) {
+                    $keepLock = true;
+
+                    return $lock;
+                }
+
+                if ($rateLimit->remaining > 0) {
+                    $this->store->put(
+                        $effectiveKey,
+                        $rateLimit->withRemaining($rateLimit->remaining - 1)->toArray(),
+                        $this->ttlFor($rateLimit),
+                    );
+
+                    return null;
+                }
+
+                $delay = $this->withMargin($rateLimit->secondsUntilReset($this->clock));
+            } finally {
+                if (! $keepLock) {
+                    $lock->release();
+                }
+            }
+
+            $this->logger->debug(sprintf(
+                'Rate limit bucket "%s" exhausted; sleeping %.2fs until reset.',
+                $effectiveKey,
+                $delay,
+            ));
+
+            $this->sleeper->sleep($delay);
+            $slept = true;
         }
-
-        $rateLimit = RateLimit::fromArray($stored);
-        if (! $rateLimit->shouldDelay($this->clock)) {
-            return;
-        }
-
-        $delay = $this->withMargin($rateLimit->secondsUntilReset($this->clock));
-
-        $this->logger->debug(sprintf(
-            'Rate limit bucket "%s" exhausted; sleeping %.2fs until reset.',
-            $effectiveKey,
-            $delay,
-        ));
-
-        $this->sleeper->sleep($delay);
     }
 
     /**
@@ -148,9 +184,40 @@ final class RateLimitHandler implements HandlerInterface
             $effectiveKey = $this->bucketKeys->observe($routeKey, $rateLimit->bucketHash, $major);
         }
 
+        $rateLimit = $this->lowestSeen($effectiveKey, $rateLimit);
+
         $this->store->put($effectiveKey, $rateLimit->toArray(), $this->ttlFor($rateLimit));
 
         return $effectiveKey;
+    }
+
+    /**
+     * With requests in flight concurrently their responses can land out of
+     * order, and a later one carrying a higher `remaining` would hand back
+     * capacity that has already been spent. Keep the lowest count seen while
+     * the window holds.
+     *
+     * Same-window responses agree on the reset instant to within network
+     * jitter, a new window moves it by the whole window length; anything
+     * within half a second is treated as the same window.
+     */
+    private function lowestSeen(string $effectiveKey, RateLimit $fresh): RateLimit
+    {
+        $stored = $this->store->get($effectiveKey);
+
+        if ($stored === null) {
+            return $fresh;
+        }
+
+        $previous = RateLimit::fromArray($stored);
+
+        if ($fresh->reset - $previous->reset >= 0.5 || $previous->secondsUntilReset($this->clock) <= 0.0) {
+            return $fresh;
+        }
+
+        return $fresh->remaining <= $previous->remaining
+            ? $fresh
+            : $fresh->withRemaining($previous->remaining);
     }
 
     private function shouldRetry(ResponseInterface $response, int $tries): bool

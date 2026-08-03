@@ -288,6 +288,56 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertSame(1, $lockFactory->released);
     }
 
+    public function test_lock_is_not_held_while_a_known_bucket_is_requested(): void
+    {
+        $store = $this->store();
+        $request = new Request('GET', 'https://api.test/users');
+        $response = new Response(200, ['X-RateLimit-Remaining' => '5', 'X-RateLimit-Reset' => '10']);
+        $lockFactory = new SpyLockFactory();
+        $handler = $this->handler($store, new Options(), new Headers(), new DefaultBucketResolver(), $lockFactory);
+
+        // The first request discovers the allowance and does hold the lock.
+        $handler->handle($this->responder($response), $request, []);
+
+        $heldDuringRequest = null;
+        $handler->handle(
+            static function () use ($lockFactory, $response, &$heldDuringRequest): ResponseInterface {
+                $heldDuringRequest = $lockFactory->acquired - $lockFactory->released;
+
+                return $response;
+            },
+            $request,
+            [],
+        );
+
+        $this->assertSame(0, $heldDuringRequest, 'A known bucket must allow concurrent requests.');
+    }
+
+    public function test_reserved_slots_count_down_within_the_window(): void
+    {
+        $store = $this->store();
+        $request = new Request('GET', 'https://api.test/users');
+        // Every response repeats the same window and allowance, as in-flight
+        // siblings would; only the reservations may move it.
+        $response = new Response(200, [
+            'X-RateLimit-Limit' => '5',
+            'X-RateLimit-Remaining' => '5',
+            'X-RateLimit-Reset' => '10',
+        ]);
+
+        // One discovery request plus the five it reports as available.
+        for ($i = 0; $i < 6; $i++) {
+            $this->handler($store)->handle($this->responder($response), $request, []);
+        }
+
+        $this->assertSame(0, $this->sleeper->count());
+
+        $this->handler($store)->handle($this->responder($response), $request, []);
+
+        $this->assertSame(1, $this->sleeper->count(), 'Spent reservations must not be handed back.');
+        $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
     private function store(): InMemoryStore
     {
         return new InMemoryStore($this->clock);

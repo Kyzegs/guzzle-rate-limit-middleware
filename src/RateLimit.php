@@ -78,6 +78,15 @@ final class RateLimit
     }
 
     /**
+     * The same window with a different allowance left, for claiming a slot
+     * before the request that spends it has been sent.
+     */
+    public function withRemaining(int $remaining): self
+    {
+        return new self($this->limit, max(0, $remaining), $this->reset, $this->bucketHash);
+    }
+
+    /**
      * Whether a request should wait before being sent: the bucket is exhausted
      * and the window has not yet reset.
      */
