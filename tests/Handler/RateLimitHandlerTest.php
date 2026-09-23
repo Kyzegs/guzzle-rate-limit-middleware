@@ -22,8 +22,10 @@ use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\FakeClock;
+use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\GuardedStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RecordingSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyLockFactory;
+use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\TrackingLockFactory;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
@@ -482,6 +484,59 @@ final class RateLimitHandlerTest extends TestCase
 
         $this->assertSame(1, $this->sleeper->count(), 'The spent slot must not be handed back.');
         $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_bucket_state_is_only_written_under_its_lock(): void
+    {
+        $locks = new TrackingLockFactory();
+        $store = new GuardedStore($this->store(), $locks);
+        $handler = $this->handler($store, new Options(), new Headers(), new DefaultBucketResolver(), $locks);
+        $request = new Request('GET', 'https://api.test/users');
+        $response = new Response(200, ['X-RateLimit-Remaining' => '5', 'X-RateLimit-Reset' => '10']);
+
+        // The probe writes under the lock it already holds ...
+        $handler->handle($this->responder($response), $request, []);
+        // ... and a request on the known bucket, which sent without holding
+        // it, takes it again to merge its response.
+        $handler->handle($this->responder($response), $request, []);
+
+        $this->assertSame([], $store->unguardedWrites);
+        $this->assertSame([], $locks->held);
+    }
+
+    public function test_discovered_bucket_is_written_under_its_own_lock(): void
+    {
+        $locks = new TrackingLockFactory();
+        $store = new GuardedStore($this->store(), $locks);
+        $handler = $this->handler($store, new Options(), Headers::discord(), new DiscordBucketResolver(), $locks);
+        $response = new Response(200, [
+            'X-RateLimit-Remaining' => '4',
+            'X-RateLimit-Reset-After' => '5',
+            'X-RateLimit-Bucket' => 'abcd',
+        ]);
+
+        // The probe holds the route key's lock; the state lands on the bucket key.
+        $handler->handle($this->responder($response), new Request('GET', 'https://discord.com/api/v10/channels/1/messages'), []);
+        $handler->handle($this->responder($response), new Request('GET', 'https://discord.com/api/v10/channels/1/messages'), []);
+
+        $this->assertSame([], $store->unguardedWrites);
+        $this->assertSame([], $locks->held);
+    }
+
+    public function test_unmetered_route_is_recorded_under_its_lock(): void
+    {
+        $locks = new TrackingLockFactory();
+        $store = new GuardedStore($this->store(), $locks);
+        $handler = $this->handler($store, new Options(), new Headers(), new DefaultBucketResolver(), $locks);
+        $request = new Request('GET', 'https://api.test/health');
+
+        // The probe records the route as unmetered under the lock it holds;
+        // the next request, sent without it, takes it to record its response.
+        $handler->handle($this->responder(new Response(200)), $request, []);
+        $handler->handle($this->responder(new Response(200)), $request, []);
+
+        $this->assertSame([], $store->unguardedWrites);
+        $this->assertSame([], $locks->held);
     }
 
     public function test_reserved_slots_count_down_within_the_window(): void

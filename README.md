@@ -201,7 +201,8 @@ $middleware = RateLimitMiddleware::create(lockFactory: new MyLockFactory());
 
 The lock covers the bookkeeping, not the request. A caller takes a slot out of
 the bucket's remaining allowance and releases the lock before sending, so a
-bucket runs as many requests in parallel as it has capacity for. The lock is
+bucket runs as many requests in parallel as it has capacity for. It takes the
+lock again briefly to record the response. The lock is
 only held across a round trip when the allowance is still unknown — the first
 request on a bucket, and the first after a window resets, goes alone because
 nothing else can reveal the new limit. A route whose successful responses carry

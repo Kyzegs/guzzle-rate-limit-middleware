@@ -92,7 +92,7 @@ final class RateLimitHandler implements HandlerInterface
                 $isPromise = $promise instanceof PromiseInterface;
                 $response = $isPromise ? $promise->wait() : $promise;
 
-                $effectiveKey = $this->persist($response, $routeKey, $major, $identity, $effectiveKey);
+                $effectiveKey = $this->persist($response, $routeKey, $major, $identity, $effectiveKey, $probe !== null ? $effectiveKey : null);
                 $this->recordGlobalLimit($response, $identity);
                 $this->recordInvalidRequest($response, $identity);
             } finally {
@@ -184,6 +184,13 @@ final class RateLimitHandler implements HandlerInterface
      * Update the stored state from the response, re-keying via bucket-hash
      * discovery when the API reveals a bucket. Returns the (possibly new)
      * effective key.
+     *
+     * Both writes below read the stored window first, so they run under the
+     * bucket's lock: a reservation landing between the read and the write
+     * would otherwise be overwritten, handing a spent slot back. A probe
+     * already holds the lock for the key it reserved, and taking it a second
+     * time would deadlock a per-handle lock such as flock, so $heldKey names
+     * the key whose lock this request already has.
      */
     private function persist(
         ResponseInterface $response,
@@ -191,9 +198,10 @@ final class RateLimitHandler implements HandlerInterface
         string $major,
         string $identity,
         string $effectiveKey,
+        ?string $heldKey,
     ): string {
         if (! $this->headers->presentIn($response)) {
-            $this->recordUnmetered($response, $effectiveKey);
+            $this->underBucketLock($effectiveKey, $heldKey, fn () => $this->recordUnmetered($response, $effectiveKey));
 
             return $effectiveKey;
         }
@@ -204,11 +212,25 @@ final class RateLimitHandler implements HandlerInterface
             $effectiveKey = $this->bucketKeys->observe($routeKey, $rateLimit->bucketHash, $major, $identity);
         }
 
-        $rateLimit = $this->lowestSeen($effectiveKey, $rateLimit);
+        $this->underBucketLock($effectiveKey, $heldKey, function () use ($effectiveKey, $rateLimit): void {
+            $merged = $this->lowestSeen($effectiveKey, $rateLimit);
 
-        $this->store->put($effectiveKey, $rateLimit->toArray(), $this->ttlFor($rateLimit));
+            $this->store->put($effectiveKey, $merged->toArray(), $this->ttlFor($merged));
+        });
 
         return $effectiveKey;
+    }
+
+    private function underBucketLock(string $key, ?string $heldKey, callable $write): void
+    {
+        $lock = $key === $heldKey ? null : $this->lockFactory->make($key);
+        $lock?->acquire();
+
+        try {
+            $write();
+        } finally {
+            $lock?->release();
+        }
     }
 
     /**
