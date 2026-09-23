@@ -13,7 +13,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 - ⏳ **Pre-emptive delays** — sleeps until a bucket resets instead of failing.
 - 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws.
 - 🪣 **Bucket-hash discovery** — adapts to APIs (like Discord) that assign buckets dynamically.
-- 🔒 **Optional locking** — plug in a distributed lock to serialise concurrent callers.
+- 🔒 **Cross-process locking** — `flock()` on one host or symfony/lock (Redis, PDO, …) across hosts, or plug in your own.
 - 🧪 **Fully testable** — the clock and sleeper are injectable, so timing is deterministic in tests.
 
 ## Installation
@@ -187,13 +187,45 @@ reassigns a route. `RateLimitMiddleware::discord()` enables this together with a
 
 ## Concurrency / locking
 
-By default there is no locking. To coordinate concurrent callers that share a
-bucket (e.g. multiple workers), implement `LockFactoryInterface`/`LockInterface`
-and pass the factory:
+By default there is no locking, which is fine for a single process. Once
+several processes share a persistent store, give them a lock factory too, or
+two workers can read the same allowance and both spend it.
+
+On one host, pair `FilesystemStore` with `FlockLockFactory`. It has no
+dependencies, and the OS drops a lock the moment its holder exits, so a crashed
+worker never leaves a bucket locked:
 
 ```php
-$middleware = RateLimitMiddleware::create(lockFactory: new MyLockFactory());
+use Kyzegs\GuzzleRateLimitMiddleware\Lock\FlockLockFactory;
+use Kyzegs\GuzzleRateLimitMiddleware\Store\FilesystemStore;
+
+$middleware = RateLimitMiddleware::create(
+    store: new FilesystemStore('/var/cache/rate-limits'),
+    lockFactory: new FlockLockFactory('/var/cache/rate-limits/locks'),
+);
 ```
+
+`flock()` only coordinates processes on the same machine, and is unreliable on
+NFS. Across hosts, use `SymfonyLockFactory` over a shared
+[symfony/lock](https://symfony.com/doc/current/components/lock.html) store such
+as Redis or PDO (`composer require symfony/lock`):
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Lock\SymfonyLockFactory;
+use Kyzegs\GuzzleRateLimitMiddleware\Store\Psr16Store;
+use Symfony\Component\Lock\LockFactory;
+use Symfony\Component\Lock\Store\RedisStore;
+
+$middleware = RateLimitMiddleware::create(
+    store: new Psr16Store($psr16Cache),
+    lockFactory: new SymfonyLockFactory(
+        new LockFactory(new RedisStore($redis)),
+        ttlSeconds: 30.0, // must outlast your slowest request
+    ),
+);
+```
+
+For anything else, implement `LockFactoryInterface`/`LockInterface`.
 
 The lock covers the bookkeeping, not the request. A caller takes a slot out of
 the bucket's remaining allowance and releases the lock before sending, so a
@@ -202,8 +234,19 @@ only held across a round trip when the allowance is still unknown — the first
 request on a bucket, and the first after a window resets, goes alone because
 nothing else can reveal the new limit.
 
-This means a lock wait timeout signals genuine contention on an unknown bucket,
-not ordinary throughput.
+Both lock settings have to allow for that round trip:
+
+- **TTL** (`SymfonyLockFactory` only). A lock in Redis or a database outlives a
+  worker that crashes while holding it, so it expires after `ttlSeconds`
+  (default 30). Keep it above your Guzzle `timeout`: if it lapses mid-request,
+  a second worker may probe the same bucket and draw a 429. `flock()` needs no
+  TTL, since the OS releases the lock with the process.
+- **Timeout** (both factories). `acquire()` waits indefinitely by default. Pass
+  `timeoutSeconds` to throw a
+  `Kyzegs\GuzzleRateLimitMiddleware\Exception\LockTimeoutException` instead,
+  and make it at least as long as your slowest request, because a waiter may
+  queue behind a probe. A timeout then signals genuine contention on an unknown
+  bucket, not ordinary throughput.
 
 ## Testing your integration
 
