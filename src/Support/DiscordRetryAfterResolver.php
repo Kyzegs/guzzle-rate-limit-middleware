@@ -17,16 +17,9 @@ final class DiscordRetryAfterResolver extends DefaultRetryAfterResolver
             return max(0.0, (float) $header);
         }
 
-        $body = $response->getBody();
-        $position = $body->isSeekable() ? $body->tell() : null;
-        $contents = (string) $body;
-        if ($position !== null) {
-            $body->seek($position);
-        }
-
-        $decoded = json_decode($contents, true);
-        if (is_array($decoded) && is_numeric($decoded['retry_after'] ?? null)) {
-            return max(0.0, (float) $decoded['retry_after']);
+        $retryAfter = JsonBody::decode($response)['retry_after'] ?? null;
+        if (is_numeric($retryAfter)) {
+            return max(0.0, (float) $retryAfter);
         }
 
         return parent::resolve($response, $headers, $clock);

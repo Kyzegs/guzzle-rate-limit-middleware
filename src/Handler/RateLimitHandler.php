@@ -26,6 +26,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\BucketKeyResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\JsonBody;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Log\LoggerInterface;
@@ -275,20 +276,15 @@ final class RateLimitHandler implements HandlerInterface
         }
 
         $scope = HeaderParser::value($response, $this->headers->scope);
-
-        if ($scope === null) {
-            $body = $response->getBody();
-            $position = $body->isSeekable() ? $body->tell() : null;
-            $decoded = json_decode((string) $body, true);
-            if ($position !== null) {
-                $body->seek($position);
-            }
-            if (is_array($decoded) && ($decoded['global'] ?? false) === true) {
-                return true;
-            }
+        if ($scope !== null) {
+            return strtolower((string) $scope) === 'global';
         }
 
-        return $scope !== null && strtolower((string) $scope) === 'global';
+        // Only a 429 describes a rate limit in its body. On any other response
+        // the body is the API's own payload, where a "global" field means
+        // something else entirely.
+        return $response->getStatusCode() === 429
+            && (JsonBody::decode($response)['global'] ?? false) === true;
     }
 
     private function withMargin(float $delay): float
@@ -344,7 +340,7 @@ final class RateLimitHandler implements HandlerInterface
 
     private function recordGlobalLimit(ResponseInterface $response, string $identity): void
     {
-        if (! $this->isGlobal($response)) {
+        if ($response->getStatusCode() !== 429 || ! $this->isGlobal($response)) {
             return;
         }
         $delay = $this->retryAfter($response);

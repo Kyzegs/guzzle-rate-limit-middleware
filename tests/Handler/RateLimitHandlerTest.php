@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Kyzegs\GuzzleRateLimitMiddleware\Tests\Handler;
 
+use GuzzleHttp\Psr7\NoSeekStream;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
+use GuzzleHttp\Psr7\Utils;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
@@ -206,6 +208,67 @@ final class RateLimitHandlerTest extends TestCase
 
         $this->assertSame(1, $this->sleeper->count());
         $this->assertEqualsWithDelta(2.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_global_field_in_a_successful_body_does_not_block(): void
+    {
+        $handler = $this->handler(
+            $this->store(),
+            new Options(safetyBufferSeconds: 0, globalLimit: new GlobalLimit()),
+            Headers::discord(),
+            new DiscordBucketResolver(),
+        );
+        $headers = ['X-RateLimit-Remaining' => '4', 'X-RateLimit-Reset-After' => '3600'];
+
+        // An ordinary payload that happens to carry a "global" field.
+        $handler->handle(
+            $this->responder(new Response(200, $headers, '{"id":"1","global":true}')),
+            new Request('GET', 'https://discord.com/api/v10/applications/1/commands', ['Authorization' => 'Bot secret']),
+            [],
+        );
+        $handler->handle(
+            $this->responder(new Response(200, $headers)),
+            new Request('GET', 'https://discord.com/api/v10/guilds/2', ['Authorization' => 'Bot secret']),
+            [],
+        );
+
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_streamed_body_is_left_for_the_caller(): void
+    {
+        $handler = $this->handler($this->store(), new Options(globalLimit: new GlobalLimit()));
+
+        $response = $handler->handle(
+            $this->responder(new Response(200, ['X-RateLimit-Remaining' => '5'], new NoSeekStream(Utils::streamFor('{"hello":"world"}')))),
+            new Request('GET', 'https://api.test/download'),
+            [],
+        );
+
+        $this->assertSame('{"hello":"world"}', (string) $response->getBody());
+    }
+
+    public function test_streamed_429_body_is_not_read_for_retry_after(): void
+    {
+        $handler = new RateLimitHandler(
+            new Options(maxRetries: 0, safetyBufferSeconds: 0, throwOnRateLimit: false),
+            Headers::discord(),
+            $this->store(),
+            new NullLogger(),
+            new DiscordBucketResolver(),
+            new NullLockFactory(),
+            $this->clock,
+            $this->sleeper,
+            retryAfterResolver: new DiscordRetryAfterResolver(),
+        );
+
+        $response = $handler->handle(
+            $this->responder(new Response(429, [], new NoSeekStream(Utils::streamFor('{"retry_after":2,"global":true}')))),
+            new Request('GET', 'https://discord.com/api/v10/users/@me'),
+            [],
+        );
+
+        $this->assertSame('{"retry_after":2,"global":true}', (string) $response->getBody());
     }
 
     public function test_throws_after_retries_exhausted(): void

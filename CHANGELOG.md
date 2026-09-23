@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Only look for a global-limit flag in the body of a 429, so ordinary JSON with a `global` field no longer starts a global cooldown.
+- Never read a non-seekable response body, so streamed responses reach the caller intact.
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.
