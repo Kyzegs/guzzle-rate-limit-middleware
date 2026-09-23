@@ -31,6 +31,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Retry\StatusCodeRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\BucketKeyResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\ClientLimiter;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\JsonBody;
 use Psr\Http\Message\RequestInterface;
@@ -59,6 +60,9 @@ use Throwable;
  *
  * Persisting through the injected {@see StoreInterface} is what makes rate
  * limiting work across separate requests/processes, not just within one call.
+ *
+ * Client-side limits (Options::$limits) are enforced alongside, through the
+ * same store, locks and delay margin, whether or not the API sends headers.
  */
 final class RateLimitHandler implements HandlerInterface
 {
@@ -95,6 +99,8 @@ final class RateLimitHandler implements HandlerInterface
 
     private readonly RateLimitParserInterface $parser;
 
+    private readonly ClientLimiter $clientLimiter;
+
     public function __construct(
         private readonly Options $options,
         private readonly Headers $headers,
@@ -113,6 +119,15 @@ final class RateLimitHandler implements HandlerInterface
         $this->retryStrategy = $retryStrategy ?? StatusCodeRetryStrategy::fromOptions($this->options);
         $this->retryLimit = $retryStrategy === null ? $this->options->maxRetries : null;
         $this->parser = $parser ?? new HeaderRateLimitParser($this->headers);
+        $this->clientLimiter = new ClientLimiter(
+            $this->options->limits,
+            $this->store,
+            $this->lockFactory,
+            $this->clock,
+            $this->sleeper,
+            $this->withMargin(...),
+            $this->logger,
+        );
     }
 
     /**
@@ -170,6 +185,7 @@ final class RateLimitHandler implements HandlerInterface
         $probe = $this->reserveBucketCapacity($effectiveKey);
 
         try {
+            $this->clientLimiter->reserve($request, $identity, $routeKey);
             $this->reserveGlobalCapacity($request, $identity);
 
             $transfer = Create::promiseFor($handler($request, $options));

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Kyzegs\GuzzleRateLimitMiddleware\Config;
 
+use InvalidArgumentException;
+
 /**
  * Behavioural tuning for the middleware (separate from header names, which live
  * in {@see Headers}).
@@ -23,6 +25,7 @@ final class Options
      * @param int        $maxStoreTtl         Upper bound (seconds) for how long bucket state is cached.
      * @param int[]      $retryStatusCodes    HTTP status codes that trigger a retry.
      * @param float|null $maxDelaySeconds     Longest delay to accept; a longer one throws RateLimitDelayExceededException.
+     * @param list<Limit> $limits             Client-side budgets every applicable request must fit before it is sent.
      *
      * @throws \InvalidArgumentException When a value is out of range.
      */
@@ -36,6 +39,7 @@ final class Options
         public readonly ?GlobalLimit $globalLimit = null,
         public readonly ?InvalidRequestLimit $invalidRequestLimit = null,
         public readonly ?float $maxDelaySeconds = null,
+        public readonly array $limits = [],
     ) {
         Assert::atLeast('Options::$maxRetries', $maxRetries, 0);
         Assert::atLeast('Options::$safetyBufferSeconds', $safetyBufferSeconds, 0);
@@ -45,6 +49,12 @@ final class Options
 
         if ($maxDelaySeconds !== null) {
             Assert::atLeast('Options::$maxDelaySeconds', $maxDelaySeconds, 0);
+        }
+
+        foreach ($limits as $limit) {
+            if (! $limit instanceof Limit) {
+                throw new InvalidArgumentException(sprintf('Options::$limits may only contain %s instances.', Limit::class));
+            }
         }
     }
 

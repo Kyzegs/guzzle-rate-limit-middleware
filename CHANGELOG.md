@@ -37,6 +37,8 @@
 - Add `RateLimitParserInterface` and a `parser:` option, for APIs whose rate limit doesn't fit one number per header. A parser returning `null` leaves the stored state untouched.
 - Read the IETF draft's structured `RateLimit`/`RateLimit-Policy` fields (current list form and older dictionary form) in `RateLimitMiddleware::ietf()`, tracking the policy that runs out first. The separate `RateLimit-*` headers still work.
 - Add `FractionHeaderParser` for "used/limit" leaky-bucket headers, `HostBucketResolver`, and a `RateLimitMiddleware::shopify()` preset.
+- Add client-side limits (`Options::$limits`): self-imposed fixed-window, sliding-window and token-bucket budgets, scoped per identity, host, route or everything and optionally filtered per request, for APIs that document limits without sending headers.
+- A request waits until every applicable limit has room and consumes from none of them while it waits.
 
 ## 1.2.0
 
