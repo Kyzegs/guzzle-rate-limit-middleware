@@ -19,6 +19,7 @@ require __DIR__ . '/../../vendor/autoload.php';
 
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
@@ -51,11 +52,11 @@ $send->push(RateLimitMiddleware::create(
 fwrite(STDOUT, "ready\n");
 fgets(STDIN);
 
-// The stack is invoked directly rather than through a Client: the middleware
-// runs synchronously either way, and Client's docblocks promise nothing but
-// GuzzleException, which would make static analysis flag the catch below.
+// The stack is invoked directly rather than through a Client, whose docblocks
+// promise nothing but GuzzleException, which would make static analysis flag
+// the catch below.
 try {
-    $send(new Request('GET', $url), []);
+    Create::promiseFor($send(new Request('GET', $url), []))->wait();
 } catch (RateLimitDelayExceededException) {
     fwrite(STDOUT, "waited\n");
 }

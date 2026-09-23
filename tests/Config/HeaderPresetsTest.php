@@ -86,8 +86,8 @@ final class HeaderPresetsTest extends TestCase
         $respond = static fn (): ResponseInterface => new Response(200, $headers);
         $request = new Request('GET', 'https://api.test/items');
 
-        $handler->handle($respond, $request, []);
-        $handler->handle($respond, $request, []);
+        $handler->handle($respond, $request, [])->wait();
+        $handler->handle($respond, $request, [])->wait();
 
         $this->assertCount(1, $sleeper->sleeps);
         $this->assertEqualsWithDelta(30.0, $sleeper->sleeps[0], 0.001);

@@ -153,7 +153,8 @@ window, …) throw an `InvalidArgumentException` when the config is built.
 
 When retries are exhausted on a `429` and `throwOnRateLimit` is `true`, a
 `Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException` is thrown
-(carrying the request, response, retry-after seconds and global flag).
+(carrying the request, response, retry-after seconds and global flag); for an
+async request, the promise rejects with it.
 
 ## Bucket resolution
 
@@ -260,6 +261,29 @@ Both lock settings have to allow for that round trip:
   and make it at least as long as your slowest request, because a waiter may
   queue behind a probe. A timeout then signals genuine contention on an unknown
   bucket, not ordinary throughput.
+
+## Async requests
+
+The middleware never waits on the transfer itself, so `getAsync()`, `Pool` and
+`Promise\Utils::all()` keep their requests in flight together:
+
+```php
+use GuzzleHttp\Promise\Utils;
+
+$responses = Utils::all([
+    $client->getAsync('https://api.github.com/users/octocat'),
+    $client->getAsync('https://api.github.com/users/torvalds'),
+])->wait();
+```
+
+Transfers run concurrently; waiting for an exhausted bucket still blocks. The
+wait for a spent bucket or global budget, and the delay before retrying a `429`,
+go through the (blocking) sleeper: each has to re-read the shared state once the
+time is up, and without an event loop there is nothing to schedule that on.
+
+Within one process, requests to a bucket whose allowance is still unknown wait
+for the first response to reveal it, then go out together. Rate-limit errors
+reject the returned promise instead of being thrown from `getAsync()`.
 
 ## Testing your integration
 

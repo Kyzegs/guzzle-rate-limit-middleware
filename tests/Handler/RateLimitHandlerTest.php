@@ -51,7 +51,7 @@ final class RateLimitHandlerTest extends TestCase
             $this->responder(new Response(200, ['X-RateLimit-Remaining' => '5'])),
             new Request('GET', 'https://api.test/users'),
             [],
-        );
+        )->wait();
 
         $this->assertSame(200, $response->getStatusCode());
         $this->assertSame(0, $this->sleeper->count());
@@ -64,11 +64,11 @@ final class RateLimitHandlerTest extends TestCase
         $exhausted = new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '10']);
 
         // First call records the exhausted state.
-        $this->handler($store)->handle($this->responder($exhausted), $request, []);
+        $this->handler($store)->handle($this->responder($exhausted), $request, [])->wait();
         $this->assertSame(0, $this->sleeper->count());
 
         // Second call (fresh handler, same store) must wait for the reset window.
-        $this->handler($store)->handle($this->responder($exhausted), $request, []);
+        $this->handler($store)->handle($this->responder($exhausted), $request, [])->wait();
 
         $this->assertSame(1, $this->sleeper->count());
         // 10s until reset + 1s default safety buffer.
@@ -81,7 +81,7 @@ final class RateLimitHandlerTest extends TestCase
         $request = new Request('GET', 'https://api.test/widgets');
         $exhausted = new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '30']);
 
-        $this->handler($store)->handle($this->responder($exhausted), $request, []);
+        $this->handler($store)->handle($this->responder($exhausted), $request, [])->wait();
 
         // A brand-new handler, simulating a separate process, sharing only the store.
         $secondSleeper = new RecordingSleeper();
@@ -96,7 +96,7 @@ final class RateLimitHandlerTest extends TestCase
             $secondSleeper,
         );
 
-        $secondHandler->handle($this->responder($exhausted), $request, []);
+        $secondHandler->handle($this->responder($exhausted), $request, [])->wait();
 
         $this->assertSame(1, $secondSleeper->count(), 'State must survive outside the original operation.');
         $this->assertEqualsWithDelta(31.0, $secondSleeper->sleeps[0], 0.001);
@@ -113,7 +113,7 @@ final class RateLimitHandlerTest extends TestCase
             ),
             new Request('GET', 'https://api.test/users'),
             [],
-        );
+        )->wait();
 
         $this->assertSame(200, $response->getStatusCode());
         $this->assertSame(1, $this->sleeper->count());
@@ -131,7 +131,7 @@ final class RateLimitHandlerTest extends TestCase
             ),
             new Request('GET', 'https://api.test/users'),
             [],
-        );
+        )->wait();
 
         $this->assertSame(200, $response->getStatusCode());
         $this->assertEqualsWithDelta(31.0, $this->sleeper->sleeps[0], 0.001); // 30 + 1 buffer
@@ -158,7 +158,7 @@ final class RateLimitHandlerTest extends TestCase
             ),
             new Request('GET', 'https://discord.com/api/v10/users/@me'),
             [],
-        );
+        )->wait();
 
         $this->assertSame(200, $response->getStatusCode());
         $this->assertEqualsWithDelta(2.5, $this->sleeper->sleeps[0], 0.001);
@@ -172,9 +172,9 @@ final class RateLimitHandlerTest extends TestCase
         ));
         $respond = $this->responder(new Response(200, ['X-RateLimit-Remaining' => '10']));
 
-        $handler->handle($respond, new Request('GET', 'https://api.test/one', ['Authorization' => 'Bot secret']), []);
-        $handler->handle($respond, new Request('GET', 'https://api.test/two', ['Authorization' => 'Bot secret']), []);
-        $handler->handle($respond, new Request('GET', 'https://api.test/three', ['Authorization' => 'Bot secret']), []);
+        $handler->handle($respond, new Request('GET', 'https://api.test/one', ['Authorization' => 'Bot secret']), [])->wait();
+        $handler->handle($respond, new Request('GET', 'https://api.test/two', ['Authorization' => 'Bot secret']), [])->wait();
+        $handler->handle($respond, new Request('GET', 'https://api.test/three', ['Authorization' => 'Bot secret']), [])->wait();
 
         $this->assertSame(1, $this->sleeper->count());
         $this->assertEqualsWithDelta(1.0, $this->sleeper->sleeps[0], 0.001);
@@ -188,8 +188,8 @@ final class RateLimitHandlerTest extends TestCase
         ));
         $respond = $this->responder(new Response(200, ['X-RateLimit-Remaining' => '10']));
 
-        $handler->handle($respond, new Request('GET', 'https://api.test/users', ['Authorization' => 'Bot first']), []);
-        $handler->handle($respond, new Request('GET', 'https://api.test/users', ['Authorization' => 'Bearer second']), []);
+        $handler->handle($respond, new Request('GET', 'https://api.test/users', ['Authorization' => 'Bot first']), [])->wait();
+        $handler->handle($respond, new Request('GET', 'https://api.test/users', ['Authorization' => 'Bearer second']), [])->wait();
 
         $this->assertSame(0, $this->sleeper->count());
     }
@@ -215,7 +215,7 @@ final class RateLimitHandlerTest extends TestCase
                 $this->responder(new Response(429, ['Content-Type' => 'application/json'], '{"retry_after":2,"global":true}')),
                 new Request('GET', 'https://discord.com/api/v10/channels/1', ['Authorization' => 'Bot secret']),
                 [],
-            );
+            )->wait();
         } catch (RateLimitExceededException) {
         }
 
@@ -223,7 +223,7 @@ final class RateLimitHandlerTest extends TestCase
             $this->responder(new Response(200, ['X-RateLimit-Remaining' => '1'])),
             new Request('GET', 'https://discord.com/api/v10/guilds/2', ['Authorization' => 'Bot secret']),
             [],
-        );
+        )->wait();
 
         $this->assertSame(1, $this->sleeper->count());
         $this->assertEqualsWithDelta(2.0, $this->sleeper->sleeps[0], 0.001);
@@ -244,12 +244,12 @@ final class RateLimitHandlerTest extends TestCase
             $this->responder(new Response(200, $headers, '{"id":"1","global":true}')),
             new Request('GET', 'https://discord.com/api/v10/applications/1/commands', ['Authorization' => 'Bot secret']),
             [],
-        );
+        )->wait();
         $handler->handle(
             $this->responder(new Response(200, $headers)),
             new Request('GET', 'https://discord.com/api/v10/guilds/2', ['Authorization' => 'Bot secret']),
             [],
-        );
+        )->wait();
 
         $this->assertSame(0, $this->sleeper->count());
     }
@@ -262,7 +262,7 @@ final class RateLimitHandlerTest extends TestCase
             $this->responder(new Response(200, ['X-RateLimit-Remaining' => '5'], new NoSeekStream(Utils::streamFor('{"hello":"world"}')))),
             new Request('GET', 'https://api.test/download'),
             [],
-        );
+        )->wait();
 
         $this->assertSame('{"hello":"world"}', (string) $response->getBody());
     }
@@ -285,7 +285,7 @@ final class RateLimitHandlerTest extends TestCase
             $this->responder(new Response(429, [], new NoSeekStream(Utils::streamFor('{"retry_after":2,"global":true}')))),
             new Request('GET', 'https://discord.com/api/v10/users/@me'),
             [],
-        );
+        )->wait();
 
         $this->assertSame('{"retry_after":2,"global":true}', (string) $response->getBody());
     }
@@ -300,7 +300,7 @@ final class RateLimitHandlerTest extends TestCase
             $this->responder(new Response(429, ['Retry-After' => '2'])),
             new Request('GET', 'https://api.test/users'),
             [],
-        );
+        )->wait();
     }
 
     public function test_does_not_throw_when_disabled(): void
@@ -311,7 +311,7 @@ final class RateLimitHandlerTest extends TestCase
             $this->responder(new Response(429, ['Retry-After' => '2'])),
             new Request('GET', 'https://api.test/users'),
             [],
-        );
+        )->wait();
 
         $this->assertSame(429, $response->getStatusCode());
     }
@@ -329,7 +329,7 @@ final class RateLimitHandlerTest extends TestCase
             ])),
             new Request('POST', 'https://discord.com/api/v10/channels/123/messages'),
             [],
-        );
+        )->wait();
 
         $this->assertNotNull(
             $store->get('bucket:' . hash('sha256', "unauthenticated\0abcd\0channel_id=123")),
@@ -353,11 +353,11 @@ final class RateLimitHandlerTest extends TestCase
         );
 
         // The first bot spends its allowance on the channel's bucket ...
-        $handler->handle($this->responder($response(0)), $request('Bot first'), []);
+        $handler->handle($this->responder($response(0)), $request('Bot first'), [])->wait();
 
         // ... which must not hold back a second bot on the same bucket hash.
-        $handler->handle($this->responder($response(4)), $request('Bot second'), []);
-        $handler->handle($this->responder($response(3)), $request('Bot second'), []);
+        $handler->handle($this->responder($response(4)), $request('Bot second'), [])->wait();
+        $handler->handle($this->responder($response(3)), $request('Bot second'), [])->wait();
 
         $this->assertSame(0, $this->sleeper->count());
     }
@@ -373,16 +373,49 @@ final class RateLimitHandlerTest extends TestCase
         ]);
         $token = ['Authorization' => 'Bearer secret'];
 
-        $handler->handle($this->responder($core(1)), new Request('GET', 'https://api.github.com/user', $token), []);
+        $handler->handle($this->responder($core(1)), new Request('GET', 'https://api.github.com/user', $token), [])->wait();
         // Another core endpoint spends the last request of the shared allowance ...
-        $handler->handle($this->responder($core(0)), new Request('GET', 'https://api.github.com/repos/a/b', $token), []);
+        $handler->handle($this->responder($core(0)), new Request('GET', 'https://api.github.com/repos/a/b', $token), [])->wait();
         $this->assertSame(0, $this->sleeper->count());
 
         // ... so the first endpoint must not believe it still has one left.
-        $handler->handle($this->responder($core(4999)), new Request('GET', 'https://api.github.com/user', $token), []);
+        $handler->handle($this->responder($core(4999)), new Request('GET', 'https://api.github.com/user', $token), [])->wait();
 
         $this->assertSame(1, $this->sleeper->count());
         $this->assertEqualsWithDelta(61.0, $this->sleeper->sleeps[0], 0.001); // 60 until reset + 1 buffer
+    }
+
+    public function test_retry_moves_to_the_bucket_revealed_by_the_429(): void
+    {
+        $lockFactory = new SpyLockFactory();
+        $handler = $this->handler(
+            $this->store(),
+            new Options(safetyBufferSeconds: 0),
+            Headers::discord(),
+            new DiscordBucketResolver(),
+            $lockFactory,
+        );
+
+        $response = $handler->handle(
+            $this->queue(
+                new Response(429, [
+                    'Retry-After' => '2',
+                    'X-RateLimit-Remaining' => '0',
+                    'X-RateLimit-Reset-After' => '2',
+                    'X-RateLimit-Bucket' => 'abcd',
+                ]),
+                new Response(200, ['X-RateLimit-Remaining' => '4', 'X-RateLimit-Reset-After' => '5', 'X-RateLimit-Bucket' => 'abcd']),
+            ),
+            new Request('POST', 'https://discord.com/api/v10/channels/123/messages'),
+            [],
+        )->wait();
+
+        $bucketKey = 'bucket:' . hash('sha256', "unauthenticated\0abcd\0channel_id=123");
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertCount(3, $lockFactory->keys, 'First attempt, recording its response, and the retry.');
+        $this->assertNotSame($bucketKey, $lockFactory->keys[0], 'The first attempt only knows the route.');
+        $this->assertSame($bucketKey, $lockFactory->keys[2], 'The retry reserves under the discovered bucket.');
     }
 
     public function test_lock_is_acquired_and_released(): void
@@ -394,7 +427,7 @@ final class RateLimitHandlerTest extends TestCase
             $this->responder(new Response(200, ['X-RateLimit-Remaining' => '5'])),
             new Request('GET', 'https://api.test/users'),
             [],
-        );
+        )->wait();
 
         $this->assertSame(1, $lockFactory->acquired);
         $this->assertSame(1, $lockFactory->released);
@@ -410,7 +443,7 @@ final class RateLimitHandlerTest extends TestCase
                 $this->responder(new Response(429, ['Retry-After' => '1'])),
                 new Request('GET', 'https://api.test/users'),
                 [],
-            );
+            )->wait();
         } catch (RateLimitExceededException) {
             // expected
         }
@@ -427,7 +460,7 @@ final class RateLimitHandlerTest extends TestCase
         $handler = $this->handler($store, new Options(), new Headers(), new DefaultBucketResolver(), $lockFactory);
 
         // The first request discovers the allowance and does hold the lock.
-        $handler->handle($this->responder($response), $request, []);
+        $handler->handle($this->responder($response), $request, [])->wait();
 
         $heldDuringRequest = null;
         $handler->handle(
@@ -438,7 +471,7 @@ final class RateLimitHandlerTest extends TestCase
             },
             $request,
             [],
-        );
+        )->wait();
 
         $this->assertSame(0, $heldDuringRequest, 'A known bucket must allow concurrent requests.');
     }
@@ -449,7 +482,7 @@ final class RateLimitHandlerTest extends TestCase
         $lockFactory = new SpyLockFactory();
         $handler = $this->handler($this->store(), new Options(), new Headers(), new DefaultBucketResolver(), $lockFactory);
 
-        $handler->handle($this->responder(new Response(200)), $request, []);
+        $handler->handle($this->responder(new Response(200)), $request, [])->wait();
 
         $this->assertSame(0, $this->heldDuringRequest($handler, $lockFactory, $request, new Response(200)));
     }
@@ -460,7 +493,7 @@ final class RateLimitHandlerTest extends TestCase
         $lockFactory = new SpyLockFactory();
         $handler = $this->handler($this->store(), new Options(), new Headers(), new DefaultBucketResolver(), $lockFactory);
 
-        $handler->handle($this->responder(new Response(200)), $request, []);
+        $handler->handle($this->responder(new Response(200)), $request, [])->wait();
         $this->clock->advance(61);
 
         $this->assertSame(1, $this->heldDuringRequest($handler, $lockFactory, $request, new Response(200)));
@@ -475,12 +508,12 @@ final class RateLimitHandlerTest extends TestCase
             $this->responder(new Response(200, ['X-RateLimit-Remaining' => '1', 'X-RateLimit-Reset' => '10'])),
             $request,
             [],
-        );
+        )->wait();
         // Spends the last slot, but an error page from a proxy comes back.
-        $this->handler($store)->handle($this->responder(new Response(503)), $request, []);
+        $this->handler($store)->handle($this->responder(new Response(503)), $request, [])->wait();
         $this->assertSame(0, $this->sleeper->count());
 
-        $this->handler($store)->handle($this->responder(new Response(200, ['X-RateLimit-Remaining' => '5'])), $request, []);
+        $this->handler($store)->handle($this->responder(new Response(200, ['X-RateLimit-Remaining' => '5'])), $request, [])->wait();
 
         $this->assertSame(1, $this->sleeper->count(), 'The spent slot must not be handed back.');
         $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
@@ -495,10 +528,10 @@ final class RateLimitHandlerTest extends TestCase
         $response = new Response(200, ['X-RateLimit-Remaining' => '5', 'X-RateLimit-Reset' => '10']);
 
         // The probe writes under the lock it already holds ...
-        $handler->handle($this->responder($response), $request, []);
+        $handler->handle($this->responder($response), $request, [])->wait();
         // ... and a request on the known bucket, which sent without holding
         // it, takes it again to merge its response.
-        $handler->handle($this->responder($response), $request, []);
+        $handler->handle($this->responder($response), $request, [])->wait();
 
         $this->assertSame([], $store->unguardedWrites);
         $this->assertSame([], $locks->held);
@@ -516,8 +549,8 @@ final class RateLimitHandlerTest extends TestCase
         ]);
 
         // The probe holds the route key's lock; the state lands on the bucket key.
-        $handler->handle($this->responder($response), new Request('GET', 'https://discord.com/api/v10/channels/1/messages'), []);
-        $handler->handle($this->responder($response), new Request('GET', 'https://discord.com/api/v10/channels/1/messages'), []);
+        $handler->handle($this->responder($response), new Request('GET', 'https://discord.com/api/v10/channels/1/messages'), [])->wait();
+        $handler->handle($this->responder($response), new Request('GET', 'https://discord.com/api/v10/channels/1/messages'), [])->wait();
 
         $this->assertSame([], $store->unguardedWrites);
         $this->assertSame([], $locks->held);
@@ -532,8 +565,8 @@ final class RateLimitHandlerTest extends TestCase
 
         // The probe records the route as unmetered under the lock it holds;
         // the next request, sent without it, takes it to record its response.
-        $handler->handle($this->responder(new Response(200)), $request, []);
-        $handler->handle($this->responder(new Response(200)), $request, []);
+        $handler->handle($this->responder(new Response(200)), $request, [])->wait();
+        $handler->handle($this->responder(new Response(200)), $request, [])->wait();
 
         $this->assertSame([], $store->unguardedWrites);
         $this->assertSame([], $locks->held);
@@ -553,12 +586,12 @@ final class RateLimitHandlerTest extends TestCase
 
         // One discovery request plus the five it reports as available.
         for ($i = 0; $i < 6; $i++) {
-            $this->handler($store)->handle($this->responder($response), $request, []);
+            $this->handler($store)->handle($this->responder($response), $request, [])->wait();
         }
 
         $this->assertSame(0, $this->sleeper->count());
 
-        $this->handler($store)->handle($this->responder($response), $request, []);
+        $this->handler($store)->handle($this->responder($response), $request, [])->wait();
 
         $this->assertSame(1, $this->sleeper->count(), 'Spent reservations must not be handed back.');
         $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
@@ -606,7 +639,7 @@ final class RateLimitHandlerTest extends TestCase
             },
             $request,
             [],
-        );
+        )->wait();
 
         TestCase::assertIsInt($held);
 

@@ -23,6 +23,9 @@
 - Add `FlockLockFactory`, a dependency-free `flock()` lock for workers on one host and the natural partner of `FilesystemStore`.
 - Add `SymfonyLockFactory`, an adapter over symfony/lock for locking across hosts (Redis, PDO, …), with a TTL so a crashed worker's lock expires.
 - Both take an optional acquire timeout and throw the new `LockTimeoutException` once it passes.
+- Stop waiting on the inner handler's promise. Bookkeeping and `429` retries are chained onto it, so `getAsync()`, `Pool` and `Promise\Utils::all()` keep their transfers concurrent. Waiting for an exhausted bucket, a spent global budget or a retry delay still blocks.
+- `RateLimitHandler::handle()` always returns a promise. Failures before sending (such as `InvalidRequestLimitExceededException`) reject it instead of being thrown.
+- Queue concurrent requests from one process to a bucket with an unknown allowance behind the first response, instead of blocking on the lock that request holds. The lock is also released when that request is cancelled.
 
 ## 1.2.0
 
