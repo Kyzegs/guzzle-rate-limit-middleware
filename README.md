@@ -214,7 +214,7 @@ waits. See `tests/` — `FakeClock` and `RecordingSleeper` are good starting poi
 
 ```bash
 composer test      # PHPUnit
-composer analyse   # PHPStan (level 6)
+composer analyse   # PHPStan (level 8)
 ```
 
 ## License
