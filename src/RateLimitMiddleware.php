@@ -13,6 +13,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\IdentityResolverInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\InspectableHandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
@@ -27,6 +28,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\UsleepSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
+use LogicException;
 use Psr\Http\Message\RequestInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -140,5 +142,66 @@ final class RateLimitMiddleware
     public function __invoke(callable $handler): Closure
     {
         return fn (RequestInterface $request, array $options) => $this->handler->handle($handler, $request, $options);
+    }
+
+    /**
+     * The stored state of the bucket $request would use right now, or null
+     * when nothing is known yet or its window has already reset.
+     *
+     * Pass the request as the client sends it (absolute URI, Authorization
+     * header): both decide which bucket it lands in.
+     *
+     * @throws LogicException when a custom handler does not support inspection
+     */
+    public function state(RequestInterface $request): ?RateLimit
+    {
+        return $this->inspectable(__FUNCTION__)->state($request);
+    }
+
+    /**
+     * Drop the stored state of the bucket $request would use, so the next
+     * request goes out without waiting.
+     *
+     * @throws LogicException when a custom handler does not support inspection
+     */
+    public function forget(RequestInterface $request): void
+    {
+        $this->inspectable(__FUNCTION__)->forget($request);
+    }
+
+    /**
+     * The global request budget of $request's identity, or null when no
+     * {@see GlobalLimit} is configured or $request is exempt from it.
+     *
+     * @throws LogicException when a custom handler does not support inspection
+     */
+    public function globalBudget(RequestInterface $request): ?BudgetState
+    {
+        return $this->inspectable(__FUNCTION__)->globalBudget($request);
+    }
+
+    /**
+     * The invalid-request budget of $request's identity, or null when no
+     * {@see InvalidRequestLimit} is configured.
+     *
+     * @throws LogicException when a custom handler does not support inspection
+     */
+    public function invalidRequestBudget(RequestInterface $request): ?BudgetState
+    {
+        return $this->inspectable(__FUNCTION__)->invalidRequestBudget($request);
+    }
+
+    private function inspectable(string $method): InspectableHandlerInterface
+    {
+        if (! $this->handler instanceof InspectableHandlerInterface) {
+            throw new LogicException(sprintf(
+                'Cannot call %s(): the handler %s does not implement %s.',
+                $method,
+                $this->handler::class,
+                InspectableHandlerInterface::class,
+            ));
+        }
+
+        return $this->handler;
     }
 }

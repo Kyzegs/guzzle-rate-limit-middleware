@@ -6,12 +6,13 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Handler;
 
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Promise\PromiseInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\BudgetState;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
-use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\IdentityResolverInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\InspectableHandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockInterface;
@@ -41,7 +42,7 @@ use Psr\Log\LoggerInterface;
  * Persisting through the injected {@see StoreInterface} is what makes rate
  * limiting work across separate requests/processes, not just within one call.
  */
-final class RateLimitHandler implements HandlerInterface
+final class RateLimitHandler implements InspectableHandlerInterface
 {
     private readonly BucketKeyResolver $bucketKeys;
 
@@ -65,13 +66,13 @@ final class RateLimitHandler implements HandlerInterface
      */
     public function handle(callable $handler, RequestInterface $request, array $options): mixed
     {
-        $identity = $this->identityResolver->resolve($request);
+        [
+            'identity' => $identity,
+            'routeKey' => $routeKey,
+            'major' => $major,
+            'effectiveKey' => $effectiveKey,
+        ] = $this->keysFor($request);
         $this->enforceInvalidBudget($identity);
-        $routeKey = $identity . ':' . $this->resolver->resolve($request);
-        $major = $this->resolver instanceof MajorParameterAwareInterface
-            ? $this->resolver->majorParameters($request)
-            : '';
-        $effectiveKey = $this->bucketKeys->effective($routeKey, $major);
 
         $tries = 0;
 
@@ -104,6 +105,100 @@ final class RateLimitHandler implements HandlerInterface
         }
     }
 
+    public function state(RequestInterface $request): ?RateLimit
+    {
+        return $this->liveState($this->keysFor($request)['effectiveKey']);
+    }
+
+    /**
+     * Not under the bucket lock: like persisting a response, this is a single
+     * write, and a reservation racing it merely leaves the old state standing.
+     */
+    public function forget(RequestInterface $request): void
+    {
+        $this->store->forget($this->keysFor($request)['effectiveKey']);
+    }
+
+    public function globalBudget(RequestInterface $request): ?BudgetState
+    {
+        $config = $this->options->globalLimit;
+        if ($config === null || $this->isInteractionCallback($request)) {
+            return null;
+        }
+
+        return $this->budgetState($this->globalKey($this->identityResolver->resolve($request)), $config->maxRequests);
+    }
+
+    public function invalidRequestBudget(RequestInterface $request): ?BudgetState
+    {
+        $config = $this->options->invalidRequestLimit;
+        if ($config === null) {
+            return null;
+        }
+
+        return $this->budgetState($this->invalidKey($this->identityResolver->resolve($request)), $config->maxRequests);
+    }
+
+    /**
+     * Where a request's state lives: the identity it is isolated by, the route
+     * key and major parameters that bucket-hash discovery re-keys from, and
+     * the key its state is read from right now.
+     *
+     * Sending and inspecting both derive the key here, so what an application
+     * is shown is always the bucket the request would really wait on.
+     *
+     * @return array{identity: string, routeKey: string, major: string, effectiveKey: string}
+     */
+    private function keysFor(RequestInterface $request): array
+    {
+        $identity = $this->identityResolver->resolve($request);
+        $routeKey = $identity . ':' . $this->resolver->resolve($request);
+        $major = $this->resolver instanceof MajorParameterAwareInterface
+            ? $this->resolver->majorParameters($request)
+            : '';
+
+        return [
+            'identity' => $identity,
+            'routeKey' => $routeKey,
+            'major' => $major,
+            'effectiveKey' => $this->bucketKeys->effective($routeKey, $major),
+        ];
+    }
+
+    /**
+     * The stored state while its window is still open. Entries outlive their
+     * reset (the TTL has a floor), but a lapsed window says nothing about the
+     * next one, so it counts as unknown.
+     */
+    private function liveState(string $effectiveKey): ?RateLimit
+    {
+        $stored = $this->store->get($effectiveKey);
+        $rateLimit = $stored === null ? null : RateLimit::fromArray($stored);
+
+        return $rateLimit !== null && $rateLimit->secondsUntilReset($this->clock) > 0.0 ? $rateLimit : null;
+    }
+
+    /**
+     * Read one of the self-imposed budget counters the way enforcing it does:
+     * a lapsed window counts as empty, and during a global 429 block the
+     * stored sentinel count is reported as a spent budget.
+     */
+    private function budgetState(string $key, int $max): BudgetState
+    {
+        $now = $this->clock->now();
+        $state = $this->store->get($key) ?? [];
+        $reset = (float) ($state['reset'] ?? 0.0);
+        $blockedUntil = (float) ($state['blocked_until'] ?? 0.0);
+
+        if ($blockedUntil > $now) {
+            return new BudgetState($max, $max, max($reset, $blockedUntil), $blockedUntil);
+        }
+
+        return $reset > $now
+            ? new BudgetState((int) ($state['count'] ?? 0), $max, $reset)
+            : new BudgetState(0, $max);
+    }
+
     /**
      * Claim a slot in the bucket, sleeping until the window resets when it is
      * already spent.
@@ -128,12 +223,11 @@ final class RateLimitHandler implements HandlerInterface
             $keepLock = false;
 
             try {
-                $stored = $this->store->get($effectiveKey);
-                $rateLimit = $stored === null ? null : RateLimit::fromArray($stored);
+                $rateLimit = $this->liveState($effectiveKey);
 
                 // Unknown allowance, or one that has already been waited out:
                 // only a response can reveal the new window, so go alone.
-                if ($rateLimit === null || $slept || $rateLimit->secondsUntilReset($this->clock) <= 0.0) {
+                if ($rateLimit === null || $slept) {
                     $keepLock = true;
 
                     return $lock;
@@ -313,7 +407,7 @@ final class RateLimitHandler implements HandlerInterface
             return;
         }
 
-        $key = 'global:' . hash('sha256', $identity);
+        $key = $this->globalKey($identity);
         while (true) {
             $lock = $this->lockFactory->make($key);
             $lock->acquire();
@@ -348,7 +442,7 @@ final class RateLimitHandler implements HandlerInterface
             return;
         }
         $delay = $this->retryAfter($response);
-        $key = 'global:' . hash('sha256', $identity);
+        $key = $this->globalKey($identity);
         $this->store->put($key, ['count' => PHP_INT_MAX, 'reset' => $this->clock->now() + $delay, 'blocked_until' => $this->clock->now() + $delay], (int) ceil($delay) + 1);
     }
 
@@ -358,7 +452,7 @@ final class RateLimitHandler implements HandlerInterface
         if ($config === null) {
             return;
         }
-        $state = $this->store->get('invalid:' . hash('sha256', $identity));
+        $state = $this->store->get($this->invalidKey($identity));
         if ($state !== null && (int) ($state['count'] ?? 0) >= $config->maxRequests && (float) ($state['reset'] ?? 0.0) > $this->clock->now()) {
             throw new InvalidRequestLimitExceededException((float) $state['reset'] - $this->clock->now());
         }
@@ -371,7 +465,7 @@ final class RateLimitHandler implements HandlerInterface
         if ($config === null || ! in_array($status, $config->statusCodes, true) || ($status === 429 && $this->scope($response) === 'shared')) {
             return;
         }
-        $key = 'invalid:' . hash('sha256', $identity);
+        $key = $this->invalidKey($identity);
         $lock = $this->lockFactory->make($key);
         $lock->acquire();
         try {
@@ -384,6 +478,16 @@ final class RateLimitHandler implements HandlerInterface
         } finally {
             $lock->release();
         }
+    }
+
+    private function globalKey(string $identity): string
+    {
+        return 'global:' . hash('sha256', $identity);
+    }
+
+    private function invalidKey(string $identity): string
+    {
+        return 'invalid:' . hash('sha256', $identity);
     }
 
     private function scope(ResponseInterface $response): string

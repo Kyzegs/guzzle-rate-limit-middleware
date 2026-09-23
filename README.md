@@ -14,6 +14,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 - 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws.
 - 🪣 **Bucket-hash discovery** — adapts to APIs (like Discord) that assign buckets dynamically.
 - 🔒 **Optional locking** — plug in a distributed lock to serialise concurrent callers.
+- 🔍 **Inspectable state** — ask how much of a bucket is left and when it resets, or clear it.
 - 🧪 **Fully testable** — the clock and sleeper are injectable, so timing is deterministic in tests.
 
 ## Installation
@@ -204,6 +205,48 @@ nothing else can reveal the new limit.
 
 This means a lock wait timeout signals genuine contention on an unknown bucket,
 not ordinary throughput.
+
+## Inspecting state
+
+Ask the middleware what it knows about the bucket a request would use — to
+show "N requests left", decide whether to schedule work now, or clear state
+you know is stale:
+
+```php
+use GuzzleHttp\Psr7\Request;
+
+$request = new Request('GET', 'https://api.github.com/user', ['Authorization' => "Bearer {$token}"]);
+
+$state = $middleware->state($request); // ?RateLimit
+
+if ($state !== null) {
+    printf('%d/%d left, resets at %s', $state->remaining, $state->limit, $state->resetsAt()?->format('H:i:s'));
+}
+
+$middleware->forget($request); // the next request goes out without waiting
+```
+
+Build the request the way the client sends it — absolute URI and the same
+`Authorization` header — since both decide the bucket. `state()` is `null`
+until a response has revealed the window, and again once it has reset.
+`forget()` drops the counters but keeps a bucket hash learned through
+discovery.
+
+The self-imposed budgets are exposed the same way. `globalBudget()` and
+`invalidRequestBudget()` return a `BudgetState` for the request's identity
+(`count`, `max`, `remaining()`, `reset`, and `blockedUntil` after a global
+429), or `null` when that budget is not configured:
+
+```php
+$budget = $middleware->globalBudget($request);
+
+if ($budget !== null && $budget->remaining() === 0) {
+    // defer the batch until $budget->blockedUntil ?? $budget->reset
+}
+```
+
+A custom handler opts in by implementing `InspectableHandlerInterface`; with
+one that doesn't, these methods throw a `LogicException`.
 
 ## Testing your integration
 

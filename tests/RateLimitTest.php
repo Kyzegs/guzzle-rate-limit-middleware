@@ -103,4 +103,21 @@ final class RateLimitTest extends TestCase
 
         $this->assertEquals($rateLimit, $restored);
     }
+
+    public function test_resets_at_is_the_reset_instant_in_utc(): void
+    {
+        $resetsAt = (new RateLimit(reset: 1_700_000_000.25))->resetsAt();
+
+        $this->assertNotNull($resetsAt);
+        $this->assertSame('1700000000.250000', $resetsAt->format('U.u'));
+        $this->assertSame('+00:00', $resetsAt->format('P'));
+    }
+
+    public function test_resets_at_is_null_without_a_reset(): void
+    {
+        $clock = new FakeClock(1_000.0);
+        $rateLimit = RateLimit::fromResponse(new Response(200, ['X-RateLimit-Remaining' => '3']), new Headers(), $clock);
+
+        $this->assertNull($rateLimit->resetsAt());
+    }
 }

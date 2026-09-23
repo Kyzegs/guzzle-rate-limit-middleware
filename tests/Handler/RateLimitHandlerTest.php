@@ -8,6 +8,7 @@ use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\InvalidRequestLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
@@ -336,6 +337,262 @@ final class RateLimitHandlerTest extends TestCase
 
         $this->assertSame(1, $this->sleeper->count(), 'Spent reservations must not be handed back.');
         $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_state_is_unknown_before_any_request(): void
+    {
+        $this->assertNull($this->handler($this->store())->state(new Request('GET', 'https://api.test/users')));
+    }
+
+    public function test_state_reflects_the_last_response(): void
+    {
+        $handler = $this->handler($this->store());
+        $request = new Request('GET', 'https://api.test/users/1');
+
+        $handler->handle($this->responder(new Response(200, [
+            'X-RateLimit-Limit' => '10',
+            'X-RateLimit-Remaining' => '7',
+            'X-RateLimit-Reset' => '30',
+        ])), $request, []);
+
+        $state = $handler->state($request);
+        $this->assertNotNull($state);
+        $this->assertSame(10, $state->limit);
+        $this->assertSame(7, $state->remaining);
+        $this->assertEqualsWithDelta(1_030.0, $state->reset, 0.001);
+
+        // Same bucket as far as the resolver is concerned.
+        $this->assertEquals($state, $handler->state(new Request('GET', 'https://api.test/users/2')));
+    }
+
+    public function test_state_counts_a_reservation_while_its_request_is_in_flight(): void
+    {
+        $handler = $this->handler($this->store());
+        $request = new Request('GET', 'https://api.test/users');
+        $response = new Response(200, [
+            'X-RateLimit-Limit' => '5',
+            'X-RateLimit-Remaining' => '5',
+            'X-RateLimit-Reset' => '10',
+        ]);
+
+        $handler->handle($this->responder($response), $request, []);
+
+        $inFlight = null;
+        $handler->handle(
+            static function () use ($handler, $request, $response, &$inFlight): ResponseInterface {
+                $inFlight = $handler->state($request)?->remaining;
+
+                return $response;
+            },
+            $request,
+            [],
+        );
+
+        $this->assertSame(4, $inFlight);
+        $this->assertSame(4, $handler->state($request)?->remaining, 'The slower response must not hand the slot back.');
+    }
+
+    public function test_state_is_unknown_once_the_window_has_reset(): void
+    {
+        $handler = $this->handler($this->store());
+        $request = new Request('GET', 'https://api.test/users');
+
+        $handler->handle($this->responder(new Response(200, [
+            'X-RateLimit-Remaining' => '0',
+            'X-RateLimit-Reset' => '10',
+        ])), $request, []);
+        $this->clock->advance(10);
+
+        // Still cached (the TTL has a floor), but it no longer describes a live window.
+        $this->assertNull($handler->state($request));
+    }
+
+    public function test_state_follows_the_discovered_bucket(): void
+    {
+        $handler = $this->handler($this->store(), new Options(), Headers::discord(), new DiscordBucketResolver());
+        $channel = new Request('POST', 'https://discord.com/api/v10/channels/123/messages');
+
+        $handler->handle($this->responder(new Response(200, [
+            'X-RateLimit-Limit' => '5',
+            'X-RateLimit-Remaining' => '4',
+            'X-RateLimit-Reset-After' => '5',
+            'X-RateLimit-Bucket' => 'abcd',
+        ])), $channel, []);
+
+        $this->assertSame('abcd', $handler->state($channel)?->bucketHash);
+        $this->assertNull(
+            $handler->state(new Request('POST', 'https://discord.com/api/v10/channels/456/messages')),
+            'Another channel shares the hash but not the bucket.',
+        );
+
+        // The API moves the route to another bucket; the state moves with it.
+        $handler->handle($this->responder(new Response(200, [
+            'X-RateLimit-Limit' => '10',
+            'X-RateLimit-Remaining' => '9',
+            'X-RateLimit-Reset-After' => '5',
+            'X-RateLimit-Bucket' => 'efgh',
+        ])), $channel, []);
+
+        $state = $handler->state($channel);
+        $this->assertNotNull($state);
+        $this->assertSame('efgh', $state->bucketHash);
+        $this->assertSame(9, $state->remaining);
+    }
+
+    public function test_state_is_isolated_by_identity(): void
+    {
+        $handler = $this->handler($this->store());
+        $first = new Request('GET', 'https://api.test/users', ['Authorization' => 'Bearer first']);
+
+        $handler->handle($this->responder(new Response(200, [
+            'X-RateLimit-Remaining' => '3',
+            'X-RateLimit-Reset' => '10',
+        ])), $first, []);
+
+        $this->assertSame(3, $handler->state($first)?->remaining);
+        $this->assertNull($handler->state($first->withHeader('Authorization', 'Bearer second')));
+        $this->assertNull($handler->state($first->withoutHeader('Authorization')));
+    }
+
+    public function test_forget_lets_the_next_request_go_out_without_waiting(): void
+    {
+        $handler = $this->handler($this->store());
+        $request = new Request('GET', 'https://api.test/users');
+        $exhausted = new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '10']);
+
+        $handler->handle($this->responder($exhausted), $request, []);
+        $handler->forget($request);
+
+        $this->assertNull($handler->state($request));
+
+        $handler->handle($this->responder($exhausted), $request, []);
+
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_forget_keeps_the_learned_bucket_hash(): void
+    {
+        $store = $this->store();
+        $handler = $this->handler($store, new Options(), Headers::discord(), new DiscordBucketResolver());
+        $request = new Request('POST', 'https://discord.com/api/v10/channels/123/messages');
+        $bucketKey = 'bucket:' . hash('sha256', "abcd\0channel_id=123");
+
+        $handler->handle($this->responder(new Response(200, [
+            'X-RateLimit-Remaining' => '0',
+            'X-RateLimit-Reset-After' => '5',
+            'X-RateLimit-Bucket' => 'abcd',
+        ])), $request, []);
+        $handler->forget($request);
+
+        $this->assertNull($store->get($bucketKey));
+
+        // No bucket header this time: the state still lands under the known hash.
+        $handler->handle($this->responder(new Response(200, [
+            'X-RateLimit-Remaining' => '4',
+            'X-RateLimit-Reset-After' => '5',
+        ])), $request, []);
+
+        $this->assertNotNull($store->get($bucketKey));
+        $this->assertSame(4, $handler->state($request)?->remaining);
+    }
+
+    public function test_budgets_are_null_when_not_configured(): void
+    {
+        $handler = $this->handler($this->store());
+        $request = new Request('GET', 'https://api.test/users');
+
+        $this->assertNull($handler->globalBudget($request));
+        $this->assertNull($handler->invalidRequestBudget($request));
+    }
+
+    public function test_global_budget_counts_requests_of_the_identity(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            safetyBufferSeconds: 0,
+            globalLimit: new GlobalLimit(maxRequests: 3, windowSeconds: 1),
+        ));
+        $respond = $this->responder(new Response(200, ['X-RateLimit-Remaining' => '10']));
+        $request = new Request('GET', 'https://api.test/one', ['Authorization' => 'Bot secret']);
+
+        $untouched = $handler->globalBudget($request);
+        $this->assertNotNull($untouched);
+        $this->assertSame(0, $untouched->count);
+        $this->assertSame(3, $untouched->remaining());
+        $this->assertNull($untouched->reset);
+
+        $handler->handle($respond, $request, []);
+        $handler->handle($respond, new Request('GET', 'https://api.test/two', ['Authorization' => 'Bot secret']), []);
+
+        $budget = $handler->globalBudget($request);
+        $this->assertNotNull($budget);
+        $this->assertSame(2, $budget->count);
+        $this->assertSame(3, $budget->max);
+        $this->assertSame(1, $budget->remaining());
+        $this->assertEqualsWithDelta(1_001.0, $budget->reset, 0.001);
+        $this->assertNull($budget->blockedUntil);
+
+        $this->assertSame(3, $handler->globalBudget($request->withHeader('Authorization', 'Bot other'))?->remaining());
+
+        $this->clock->advance(1);
+        $this->assertSame(3, $handler->globalBudget($request)?->remaining());
+    }
+
+    public function test_global_budget_is_null_for_exempt_interaction_callbacks(): void
+    {
+        $handler = $this->handler($this->store(), new Options(globalLimit: new GlobalLimit()));
+
+        $this->assertNull($handler->globalBudget(
+            new Request('POST', 'https://discord.com/api/v10/interactions/1/token/callback'),
+        ));
+    }
+
+    public function test_global_budget_reports_a_global_429_block(): void
+    {
+        $handler = new RateLimitHandler(
+            new Options(maxRetries: 0, safetyBufferSeconds: 0, globalLimit: new GlobalLimit()),
+            Headers::discord(),
+            $this->store(),
+            new NullLogger(),
+            new DiscordBucketResolver(),
+            new NullLockFactory(),
+            $this->clock,
+            $this->sleeper,
+            retryAfterResolver: new DiscordRetryAfterResolver(),
+        );
+        $request = new Request('GET', 'https://discord.com/api/v10/channels/1', ['Authorization' => 'Bot secret']);
+
+        try {
+            $handler->handle(
+                $this->responder(new Response(429, ['Content-Type' => 'application/json'], '{"retry_after":2,"global":true}')),
+                $request,
+                [],
+            );
+        } catch (RateLimitExceededException) {
+        }
+
+        $budget = $handler->globalBudget(new Request('GET', 'https://discord.com/api/v10/guilds/2', ['Authorization' => 'Bot secret']));
+        $this->assertNotNull($budget);
+        $this->assertSame(0, $budget->remaining());
+        $this->assertSame(50, $budget->count);
+        $this->assertEqualsWithDelta(1_002.0, $budget->blockedUntil, 0.001);
+    }
+
+    public function test_invalid_request_budget_counts_invalid_responses(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            invalidRequestLimit: new InvalidRequestLimit(maxRequests: 5, windowSeconds: 600),
+        ));
+        $request = new Request('GET', 'https://api.test/users', ['Authorization' => 'Bot secret']);
+
+        $handler->handle($this->responder(new Response(401)), $request, []);
+        $handler->handle($this->responder(new Response(200)), $request, []);
+        $handler->handle($this->responder(new Response(403)), $request, []);
+
+        $budget = $handler->invalidRequestBudget($request);
+        $this->assertNotNull($budget);
+        $this->assertSame(2, $budget->count);
+        $this->assertSame(3, $budget->remaining());
+        $this->assertEqualsWithDelta(1_600.0, $budget->reset, 0.001);
     }
 
     private function store(): InMemoryStore
