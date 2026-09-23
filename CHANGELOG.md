@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add GitLab, Twitch and Reddit presets: `RateLimitMiddleware::gitlab()`, `::twitch()` and `::reddit()`, with matching `Headers` factories.
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.

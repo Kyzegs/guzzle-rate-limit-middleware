@@ -65,6 +65,48 @@ final class Headers
         );
     }
 
+    /**
+     * GitLab.com and self-managed GitLab: RateLimit-Reset is a UNIX timestamp.
+     */
+    public static function gitlab(): self
+    {
+        return new self(
+            limit: 'RateLimit-Limit',
+            remaining: 'RateLimit-Remaining',
+            reset: 'RateLimit-Reset',
+            retryAfter: 'Retry-After',
+        );
+    }
+
+    /**
+     * Twitch Helix: Ratelimit-Reset is a UNIX timestamp.
+     */
+    public static function twitch(): self
+    {
+        return new self(
+            limit: 'Ratelimit-Limit',
+            remaining: 'Ratelimit-Remaining',
+            reset: 'Ratelimit-Reset',
+            retryAfter: 'Retry-After',
+        );
+    }
+
+    /**
+     * Reddit sends no limit header, reports remaining as a decimal ("598.0")
+     * and X-Ratelimit-Reset as seconds until the window ends, so it is read as
+     * a reset-after value.
+     */
+    public static function reddit(): self
+    {
+        return new self(
+            limit: 'X-Ratelimit-Limit',
+            remaining: 'X-Ratelimit-Remaining',
+            reset: 'X-Ratelimit-Reset',
+            resetAfter: 'X-Ratelimit-Reset',
+            retryAfter: 'Retry-After',
+        );
+    }
+
     public function needsToCheckBucketHeader(): bool
     {
         return $this->bucket !== null;

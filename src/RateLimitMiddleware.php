@@ -37,7 +37,7 @@ use Psr\Log\NullLogger;
  *
  * Use the named-argument {@see create()} factory for full control, or the
  * per-API presets ({@see discord()}, {@see github()}, {@see twitter()},
- * {@see ietf()}).
+ * {@see ietf()}, {@see gitlab()}, {@see twitch()}, {@see reddit()}).
  */
 final class RateLimitMiddleware
 {
@@ -132,6 +132,21 @@ final class RateLimitMiddleware
     public static function ietf(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
     {
         return self::create(headers: Headers::ietf(), store: $store, logger: $logger);
+    }
+
+    public static function gitlab(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
+    {
+        return self::create(headers: Headers::gitlab(), store: $store, logger: $logger);
+    }
+
+    public static function twitch(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
+    {
+        return self::create(headers: Headers::twitch(), store: $store, logger: $logger);
+    }
+
+    public static function reddit(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
+    {
+        return self::create(headers: Headers::reddit(), store: $store, logger: $logger);
     }
 
     /**

@@ -8,7 +8,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 
 ## Features
 
-- 🔧 **Configurable headers** — works with any API (Discord, GitHub, Twitter, the IETF `RateLimit-*` draft, or your own).
+- 🔧 **Configurable headers** — works with any API (Discord, GitHub, GitLab, Twitch, Reddit, Twitter, the IETF `RateLimit-*` draft, or your own).
 - 💾 **Cross-process state** — share rate-limit state via PSR-16 (Redis, Memcached, Laravel/Symfony cache), the filesystem, or in-memory.
 - ⏳ **Pre-emptive delays** — sleeps until a bucket resets instead of failing.
 - 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws.
@@ -45,6 +45,9 @@ The default middleware reads the standard `X-RateLimit-*` headers and keeps stat
 RateLimitMiddleware::github();   // X-RateLimit-* headers
 RateLimitMiddleware::twitter();  // x-rate-limit-* headers
 RateLimitMiddleware::ietf();     // RateLimit-* (IETF draft)
+RateLimitMiddleware::gitlab();   // RateLimit-* with an absolute reset
+RateLimitMiddleware::twitch();   // Ratelimit-* (Helix)
+RateLimitMiddleware::reddit();   // X-Ratelimit-* with a relative reset
 RateLimitMiddleware::discord();  // Discord headers + bucket-hash discovery
 ```
 
