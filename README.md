@@ -241,6 +241,20 @@ $sleeper->sleeps;  // every delay requested, in seconds
 $sleeper->total();
 ```
 
+The `clock:` argument also accepts any PSR-20 clock (e.g. `symfony/clock`), so
+the middleware can share your application's clock. Wrap one in `Psr20Clock`
+where a `ClockInterface` is expected, such as the stores:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\Psr20Clock;
+
+$middleware = RateLimitMiddleware::create(
+    store: new InMemoryStore(new Psr20Clock($psrClock)),
+    clock: $psrClock,
+);
+```
+
 ## Development
 
 ```bash

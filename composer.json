@@ -17,10 +17,12 @@
         "psr/simple-cache": "^3.0"
     },
     "require-dev": {
+        "phpstan/phpstan": "^2.1",
         "phpunit/phpunit": "^10.1",
-        "phpstan/phpstan": "^2.1"
+        "psr/clock": "^1.0"
     },
     "suggest": {
+        "psr/clock": "Pass a PSR-20 clock (e.g. symfony/clock) as the middleware clock via Psr20Clock",
         "psr/simple-cache": "A PSR-16 cache (e.g. Redis, Memcached, Laravel or Symfony cache) for cross-process state via Psr16Store"
     },
     "autoload": {
