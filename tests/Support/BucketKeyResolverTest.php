@@ -55,4 +55,16 @@ final class BucketKeyResolverTest extends TestCase
         $this->assertStringStartsWith('bucket:', $newKey);
         $this->assertNull($store->get($oldKey), 'Stale bucket state should be dropped on reassignment.');
     }
+
+    public function test_discovered_bucket_is_scoped_to_the_identity(): void
+    {
+        $resolver = new BucketKeyResolver(new InMemoryStore(new FakeClock()));
+        $route = 'GET /channels/{id}/messages';
+
+        $first = $resolver->observe('first:' . $route, 'abc', 'channels=1', 'first');
+        $second = $resolver->observe('second:' . $route, 'abc', 'channels=1', 'second');
+
+        $this->assertNotSame($first, $second);
+        $this->assertSame($first, $resolver->effective('first:' . $route, 'channels=1', 'first'));
+    }
 }

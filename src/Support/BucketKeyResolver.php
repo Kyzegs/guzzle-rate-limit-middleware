@@ -17,6 +17,10 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
  * hash map is keyed by the template, a hash learned for one resource (e.g. one
  * channel) immediately applies to every other resource on the same route.
  *
+ * A bucket hash names a route's limit, not whose allowance it is: two tokens
+ * on the same route see the same hash but have separate budgets, so the
+ * identity is part of every bucket key.
+ *
  * @see https://github.com/Rapptz/discord.py/blob/master/discord/http.py
  */
 final class BucketKeyResolver
@@ -32,12 +36,12 @@ final class BucketKeyResolver
     /**
      * The key the rate-limit state should currently be read from / written to.
      */
-    public function effective(string $routeKey, string $major = ''): string
+    public function effective(string $routeKey, string $major = '', string $identity = ''): string
     {
         $hash = $this->knownHash($routeKey);
 
         return $hash !== null
-            ? $this->bucketKey($hash, $major)
+            ? $this->bucketKey($hash, $major, $identity)
             : $this->fallbackKey($routeKey, $major);
     }
 
@@ -46,19 +50,19 @@ final class BucketKeyResolver
      * store state under. If the route was previously mapped to a different hash,
      * the stale entry for these major parameters is dropped.
      */
-    public function observe(string $routeKey, string $bucketHash, string $major = ''): string
+    public function observe(string $routeKey, string $bucketHash, string $major = '', string $identity = ''): string
     {
         $previous = $this->knownHash($routeKey);
 
         if ($previous !== null && $previous !== $bucketHash) {
-            $this->store->forget($this->bucketKey($previous, $major));
+            $this->store->forget($this->bucketKey($previous, $major, $identity));
         }
 
         if ($previous !== $bucketHash) {
             $this->store->put($this->mapKey($routeKey), ['hash' => $bucketHash], self::MAP_TTL);
         }
 
-        return $this->bucketKey($bucketHash, $major);
+        return $this->bucketKey($bucketHash, $major, $identity);
     }
 
     private function knownHash(string $routeKey): ?string
@@ -68,9 +72,9 @@ final class BucketKeyResolver
         return is_string($hash) ? $hash : null;
     }
 
-    private function bucketKey(string $bucketHash, string $major): string
+    private function bucketKey(string $bucketHash, string $major, string $identity): string
     {
-        return 'bucket:' . hash('sha256', $bucketHash . "\0" . $major);
+        return 'bucket:' . hash('sha256', $identity . "\0" . $bucketHash . "\0" . $major);
     }
 
     private function fallbackKey(string $routeKey, string $major): string

@@ -78,7 +78,7 @@ final class RateLimitHandler implements HandlerInterface
         $major = $this->resolver instanceof MajorParameterAwareInterface
             ? $this->resolver->majorParameters($request)
             : '';
-        $effectiveKey = $this->bucketKeys->effective($routeKey, $major);
+        $effectiveKey = $this->bucketKeys->effective($routeKey, $major, $identity);
 
         $tries = 0;
 
@@ -92,7 +92,7 @@ final class RateLimitHandler implements HandlerInterface
                 $isPromise = $promise instanceof PromiseInterface;
                 $response = $isPromise ? $promise->wait() : $promise;
 
-                $effectiveKey = $this->persist($response, $routeKey, $major, $effectiveKey);
+                $effectiveKey = $this->persist($response, $routeKey, $major, $identity, $effectiveKey);
                 $this->recordGlobalLimit($response, $identity);
                 $this->recordInvalidRequest($response, $identity);
             } finally {
@@ -189,6 +189,7 @@ final class RateLimitHandler implements HandlerInterface
         ResponseInterface $response,
         string $routeKey,
         string $major,
+        string $identity,
         string $effectiveKey,
     ): string {
         if (! $this->headers->presentIn($response)) {
@@ -200,7 +201,7 @@ final class RateLimitHandler implements HandlerInterface
         $rateLimit = RateLimit::fromResponse($response, $this->headers, $this->clock);
 
         if ($this->headers->needsToCheckBucketHeader() && $rateLimit->bucketHash !== null) {
-            $effectiveKey = $this->bucketKeys->observe($routeKey, $rateLimit->bucketHash, $major);
+            $effectiveKey = $this->bucketKeys->observe($routeKey, $rateLimit->bucketHash, $major, $identity);
         }
 
         $rateLimit = $this->lowestSeen($effectiveKey, $rateLimit);

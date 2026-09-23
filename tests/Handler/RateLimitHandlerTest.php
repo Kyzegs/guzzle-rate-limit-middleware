@@ -330,9 +330,34 @@ final class RateLimitHandlerTest extends TestCase
         );
 
         $this->assertNotNull(
-            $store->get('bucket:' . hash('sha256', "abcd\0channel_id=123")),
+            $store->get('bucket:' . hash('sha256', "unauthenticated\0abcd\0channel_id=123")),
             'State should be stored under the discovered bucket key.',
         );
+    }
+
+    public function test_discovered_bucket_is_not_shared_between_tokens(): void
+    {
+        $handler = $this->handler($this->store(), new Options(), Headers::discord(), new DiscordBucketResolver());
+        $response = static fn (int $remaining): ResponseInterface => new Response(200, [
+            'X-RateLimit-Limit' => '5',
+            'X-RateLimit-Remaining' => (string) $remaining,
+            'X-RateLimit-Reset-After' => '10',
+            'X-RateLimit-Bucket' => 'abc',
+        ]);
+        $request = static fn (string $token): RequestInterface => new Request(
+            'GET',
+            'https://discord.com/api/v10/channels/1/messages',
+            ['Authorization' => $token],
+        );
+
+        // The first bot spends its allowance on the channel's bucket ...
+        $handler->handle($this->responder($response(0)), $request('Bot first'), []);
+
+        // ... which must not hold back a second bot on the same bucket hash.
+        $handler->handle($this->responder($response(4)), $request('Bot second'), []);
+        $handler->handle($this->responder($response(3)), $request('Bot second'), []);
+
+        $this->assertSame(0, $this->sleeper->count());
     }
 
     public function test_lock_is_acquired_and_released(): void
