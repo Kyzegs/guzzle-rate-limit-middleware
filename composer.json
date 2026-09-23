@@ -20,10 +20,13 @@
     "require-dev": {
         "phpstan/phpstan": "^2.1",
         "phpunit/phpunit": "^10.1",
+        "predis/predis": "^2.2",
         "psr/clock": "^1.0",
         "symfony/lock": "^6.4 || ^7.0"
     },
     "suggest": {
+        "ext-redis": "Redis via phpredis, for RedisStore (lock-free atomic reservations) and RedisLockFactory",
+        "predis/predis": "Redis via Predis, for RedisStore (lock-free atomic reservations) and RedisLockFactory",
         "psr/clock": "Pass a PSR-20 clock (e.g. symfony/clock) as the middleware clock via Psr20Clock",
         "psr/simple-cache": "A PSR-16 cache (e.g. Redis, Memcached, Laravel or Symfony cache) for cross-process state via Psr16Store",
         "symfony/lock": "Locks shared across hosts (Redis, PDO, ...) via SymfonyLockFactory"

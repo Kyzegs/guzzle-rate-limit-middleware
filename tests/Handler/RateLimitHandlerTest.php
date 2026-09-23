@@ -25,6 +25,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Handler\RateLimitHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Reservation;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Retry\ExponentialBackoffRetryStrategy;
@@ -36,6 +37,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\RecordingSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\GuardedStore;
+use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\ScriptedReservationStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\StubRateLimitParser;
@@ -44,6 +46,7 @@ use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Log\NullLogger;
+use RuntimeException;
 
 final class RateLimitHandlerTest extends TestCase
 {
@@ -1374,6 +1377,75 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertSame(2, $budget->count);
         $this->assertSame(3, $budget->remaining());
         $this->assertEqualsWithDelta(1_600.0, $budget->reset, 0.001);
+    }
+
+    public function test_atomic_store_reserves_without_a_bucket_lock(): void
+    {
+        $store = new ScriptedReservationStore($this->store(), Reservation::reserved());
+        $lockFactory = new SpyLockFactory();
+        $handler = $this->handler($store, new Options(), new Headers(), new DefaultBucketResolver(), $lockFactory);
+
+        $handler->handle(
+            $this->responder(new Response(200, ['X-RateLimit-Remaining' => '5', 'X-RateLimit-Reset' => '10'])),
+            new Request('GET', 'https://api.test/users'),
+            [],
+        )->wait();
+
+        $this->assertSame([], $lockFactory->keys, 'The store reserves atomically; no bucket lock is needed.');
+        $this->assertCount(1, $store->reservations);
+        $this->assertSame(1_000.0, $store->reservations[0]['now'], 'The store is asked on the handler clock.');
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_atomic_store_waits_out_a_reset_with_margin_and_polls_a_probe_without(): void
+    {
+        $probeLocks = new SpyLockFactory();
+        $store = new ScriptedReservationStore(
+            $this->store(),
+            Reservation::wait(10.0),
+            Reservation::waitForProbe(0.05),
+            Reservation::probe($probeLocks->make('probe')),
+        );
+        $handler = $this->handler($store);
+
+        $releasedDuringRequest = null;
+        $handler->handle(
+            static function () use ($probeLocks, &$releasedDuringRequest): ResponseInterface {
+                $releasedDuringRequest = $probeLocks->released;
+
+                return new Response(200, ['X-RateLimit-Remaining' => '5', 'X-RateLimit-Reset' => '10']);
+            },
+            new Request('GET', 'https://api.test/users'),
+            [],
+        )->wait();
+
+        $this->assertEqualsWithDelta([11.0, 0.05], $this->sleeper->sleeps, 0.001);
+        $this->assertSame([1_000.0, 1_011.0, 1_011.05], array_map(
+            static fn (array $reservation): float => round($reservation['now'], 2),
+            $store->reservations,
+        ));
+        $this->assertSame(0, $releasedDuringRequest, 'The probe is held while its request is in flight.');
+        $this->assertSame(1, $probeLocks->released);
+    }
+
+    public function test_atomic_probe_is_released_when_the_request_fails(): void
+    {
+        $probeLocks = new SpyLockFactory();
+        $store = new ScriptedReservationStore($this->store(), Reservation::probe($probeLocks->make('probe')));
+        $handler = $this->handler($store);
+
+        try {
+            $handler->handle(
+                static fn (): ResponseInterface => throw new RuntimeException('connection reset'),
+                new Request('GET', 'https://api.test/users'),
+                [],
+            )->wait();
+            $this->fail('Expected the request failure to propagate.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('connection reset', $e->getMessage());
+        }
+
+        $this->assertSame(1, $probeLocks->released);
     }
 
     private function store(): InMemoryStore

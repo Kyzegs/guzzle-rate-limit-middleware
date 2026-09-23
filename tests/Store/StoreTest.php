@@ -5,11 +5,14 @@ declare(strict_types=1);
 namespace Kyzegs\GuzzleRateLimitMiddleware\Tests\Store;
 
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\FilesystemStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\Psr16Store;
+use Kyzegs\GuzzleRateLimitMiddleware\Store\RedisStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\ArrayCache;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
+use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RedisServer;
 use PHPUnit\Framework\TestCase;
 
 final class StoreTest extends TestCase
@@ -27,6 +30,8 @@ final class StoreTest extends TestCase
             array_map('unlink', glob($this->tempDir . '/*') ?: []);
             rmdir($this->tempDir);
         }
+
+        RedisServer::cleanUp();
     }
 
     /**
@@ -41,6 +46,16 @@ final class StoreTest extends TestCase
                 $clock,
             )],
             'psr16' => [fn (FakeClock $clock): StoreInterface => new Psr16Store(new ArrayCache())],
+            'redis (phpredis)' => [function (FakeClock $clock): StoreInterface {
+                $redis = RedisServer::phpredis();
+
+                return new RedisStore($redis, RedisServer::prefix($redis));
+            }],
+            'redis (predis)' => [function (FakeClock $clock): StoreInterface {
+                $redis = RedisServer::predis();
+
+                return new RedisStore($redis, RedisServer::prefix($redis));
+            }],
         ];
     }
 
@@ -59,6 +74,23 @@ final class StoreTest extends TestCase
 
         $store->forget('key');
         $this->assertNull($store->get('key'));
+    }
+
+    /**
+     * @dataProvider storeProvider
+     * @param callable(FakeClock): StoreInterface $factory
+     */
+    public function test_round_trips_rate_limit_state_per_key(callable $factory): void
+    {
+        $store = $factory(new FakeClock());
+        $bucket = new RateLimit(limit: 10, remaining: 4, reset: 1_000_010.25, bucketHash: 'abcd');
+        $other = new RateLimit(limit: 1, remaining: 1, reset: 1_000_001.0);
+
+        $store->put('bucket', $bucket->toArray(), 60);
+        $store->put('other', $other->toArray(), 60);
+
+        $this->assertEquals($bucket, RateLimit::fromArray($store->get('bucket') ?? []));
+        $this->assertEquals($other, RateLimit::fromArray($store->get('other') ?? []));
     }
 
     public function test_in_memory_expiry(): void

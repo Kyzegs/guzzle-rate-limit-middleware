@@ -47,6 +47,9 @@
 - Add `RateLimitMiddleware::globalBudget()` and `invalidRequestBudget()`, returning a `BudgetState` for the configured self-imposed budgets.
 - Add `InspectableHandlerInterface`, which custom handlers can implement to support inspection.
 - Add `RateLimit::resetsAt()`.
+- Add `RedisStore` (phpredis or Predis), which reserves bucket capacity in a single atomic Lua script, so buckets need no lock across processes and none is held while a request is in flight.
+- Add `AtomicReservationStoreInterface`, which the handler uses in place of the bucket lock when a store implements it.
+- Add `RedisLockFactory`: token-checked Redis locks with a TTL and an optional acquire timeout that throws `LockTimeoutException`.
 
 ## 1.2.0
 

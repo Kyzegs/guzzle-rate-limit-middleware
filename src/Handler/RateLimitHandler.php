@@ -12,6 +12,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\InvalidRequestLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\RequestOptions;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\AtomicReservationStoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\IdentityResolverInterface;
@@ -389,9 +390,15 @@ final class RateLimitHandler implements InspectableHandlerInterface
      * Returns the still-held lock when the allowance is unknown — nothing can
      * be reserved until a response reveals it, so that one request goes alone
      * and the caller releases the lock once it has landed.
+     *
+     * A store that can reserve atomically does all of this without the lock.
      */
     private function reserveBucketCapacity(RequestInterface $request, string $effectiveKey, RequestOptions $overrides): ?LockInterface
     {
+        if ($this->store instanceof AtomicReservationStoreInterface) {
+            return $this->reserveAtomically($request, $this->store, $effectiveKey, $overrides);
+        }
+
         $slept = false;
 
         while (true) {
@@ -435,21 +442,64 @@ final class RateLimitHandler implements InspectableHandlerInterface
                 }
             }
 
-            $this->logger->debug(sprintf(
-                'Rate limit bucket "%s" exhausted; sleeping %.2fs until reset.',
-                $effectiveKey,
-                $delay,
-            ), [
-                'key' => $effectiveKey,
-                'delay' => $delay,
-                'reason' => DelayReason::Bucket->value,
-                'method' => $request->getMethod(),
-            ]);
-
-            $this->dispatch(new RequestDelayed($request, $delay, DelayReason::Bucket, $effectiveKey));
-
-            $this->sleeper->sleep($delay);
+            $this->waitForBucket($request, $effectiveKey, $delay);
             $slept = true;
+        }
+    }
+
+    private function waitForBucket(RequestInterface $request, string $effectiveKey, float $delay): void
+    {
+        $this->logger->debug(sprintf(
+            'Rate limit bucket "%s" exhausted; sleeping %.2fs until reset.',
+            $effectiveKey,
+            $delay,
+        ), [
+            'key' => $effectiveKey,
+            'delay' => $delay,
+            'reason' => DelayReason::Bucket->value,
+            'method' => $request->getMethod(),
+        ]);
+
+        $this->dispatch(new RequestDelayed($request, $delay, DelayReason::Bucket, $effectiveKey));
+
+        $this->sleeper->sleep($delay);
+    }
+
+    /**
+     * The same rules as the locked path, applied by a store that reads the
+     * allowance and takes the slot in one indivisible step, so no bucket lock
+     * is needed.
+     *
+     * A probe comes back as a handle that the caller releases once the
+     * response has landed, exactly like the held lock. Waiting on another
+     * caller's probe is a short poll rather than a window, so it gets no
+     * safety margin; after a window wait the store sees the reset has passed
+     * and hands out the probe, or a slot if someone else probed first.
+     */
+    private function reserveAtomically(
+        RequestInterface $request,
+        AtomicReservationStoreInterface $store,
+        string $effectiveKey,
+        RequestOptions $overrides,
+    ): ?LockInterface {
+        while (true) {
+            $reservation = $store->reserve($effectiveKey, $this->clock->now());
+
+            if ($reservation->isReserved()) {
+                return null;
+            }
+
+            if ($reservation->probe !== null) {
+                return $reservation->probe;
+            }
+
+            if ($reservation->probeInFlight) {
+                $this->sleeper->sleep($reservation->delaySeconds);
+
+                continue;
+            }
+
+            $this->waitForBucket($request, $effectiveKey, $this->withMargin($reservation->delaySeconds, $overrides));
         }
     }
 
@@ -492,13 +542,17 @@ final class RateLimitHandler implements InspectableHandlerInterface
             $effectiveKey = $this->bucketKeys->observe($routeKey, (string) $bucketHash, $major, $identity);
         }
 
-        $merged = $this->underBucketLock($effectiveKey, function () use ($effectiveKey, $rateLimit): RateLimit {
-            $merged = $this->lowestSeen($effectiveKey, $rateLimit);
+        // Reservations on an atomic store never take this lock, so only the store
+        // itself can merge without overwriting one.
+        $merged = $this->store instanceof AtomicReservationStoreInterface
+            ? RateLimit::fromArray($this->store->merge($effectiveKey, $rateLimit->toArray(), $this->ttlFor($rateLimit), $this->clock->now()))
+            : $this->underBucketLock($effectiveKey, function () use ($effectiveKey, $rateLimit): RateLimit {
+                $merged = $this->lowestSeen($effectiveKey, $rateLimit);
 
-            $this->store->put($effectiveKey, $merged->toArray(), $this->ttlFor($merged));
+                $this->store->put($effectiveKey, $merged->toArray(), $this->ttlFor($merged));
 
-            return $merged;
-        });
+                return $merged;
+            });
 
         return [$effectiveKey, $merged];
     }
@@ -559,7 +613,7 @@ final class RateLimitHandler implements InspectableHandlerInterface
      *
      * Same-window responses agree on the reset instant to within network
      * jitter, a new window moves it by the whole window length; anything
-     * within half a second is treated as the same window.
+     * within {@see RateLimit::SAME_WINDOW_SECONDS} is treated as the same window.
      */
     private function lowestSeen(string $effectiveKey, RateLimit $fresh): RateLimit
     {
@@ -571,7 +625,7 @@ final class RateLimitHandler implements InspectableHandlerInterface
 
         $previous = RateLimit::fromArray($stored);
 
-        if ($fresh->reset - $previous->reset >= 0.5 || $previous->secondsUntilReset($this->clock) <= 0.0) {
+        if ($fresh->reset - $previous->reset >= RateLimit::SAME_WINDOW_SECONDS || $previous->secondsUntilReset($this->clock) <= 0.0) {
             return $fresh;
         }
 

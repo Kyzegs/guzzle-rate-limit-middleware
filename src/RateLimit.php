@@ -20,6 +20,12 @@ use Psr\Http\Message\ResponseInterface;
 final class RateLimit
 {
     /**
+     * Responses whose reset instants differ by less than this describe the same
+     * window; the gap is network jitter, where a new window moves it by far more.
+     */
+    public const SAME_WINDOW_SECONDS = 0.5;
+
+    /**
      * @param int        $limit      Total requests allowed in the window.
      * @param int        $remaining  Requests left in the current window.
      * @param float      $reset      Absolute UNIX timestamp at which the window resets.
