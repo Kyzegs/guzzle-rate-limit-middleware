@@ -39,6 +39,7 @@
 - Add `FractionHeaderParser` for "used/limit" leaky-bucket headers, `HostBucketResolver`, and a `RateLimitMiddleware::shopify()` preset.
 - Add client-side limits (`Options::$limits`): self-imposed fixed-window, sliding-window and token-bucket budgets, scoped per identity, host, route or everything and optionally filtered per request, for APIs that document limits without sending headers.
 - A request waits until every applicable limit has room and consumes from none of them while it waits.
+- Add a `rate_limit` request option to override `max_delay`, `max_retries`, the bucket or the identity for a single request, or bypass the middleware with `enabled: false`. Invalid values throw `InvalidArgumentException`.
 
 ## 1.2.0
 

@@ -8,8 +8,9 @@ use GuzzleHttp\Psr7\NoSeekStream;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\Psr7\Utils;
-use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
+use InvalidArgumentException;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\InvalidRequestLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Limit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\LimitAlgorithm;
@@ -36,6 +37,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\RecordingSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\GuardedStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyLockFactory;
+use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\StubRateLimitParser;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\TrackingLockFactory;
 use PHPUnit\Framework\TestCase;
@@ -922,6 +924,202 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertEqualsWithDelta(1.0, $this->sleeper->sleeps[1], 0.001);
     }
 
+    public function test_disabled_request_goes_straight_to_the_next_handler(): void
+    {
+        $store = new SpyStore($this->store());
+        $lockFactory = new SpyLockFactory();
+        $handler = $this->handler($store, new Options(
+            globalLimit: new GlobalLimit(maxRequests: 1, windowSeconds: 1),
+            invalidRequestLimit: new InvalidRequestLimit(maxRequests: 1, windowSeconds: 600),
+        ), lockFactory: $lockFactory);
+        $request = new Request('GET', 'https://api.test/users', ['Authorization' => 'Bot secret']);
+
+        // Spend the bucket, the global budget and the invalid-request budget.
+        $handler->handle(
+            $this->responder(new Response(401, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '10'])),
+            $request,
+            [],
+        )->wait();
+        $store->reads = $store->writes = [];
+        $lockFactory->acquired = 0;
+
+        $response = $handler->handle(
+            $this->queue(new Response(429, ['Retry-After' => '5'])),
+            $request,
+            ['rate_limit' => ['enabled' => false]],
+        )->wait();
+
+        $this->assertSame(429, $response->getStatusCode(), 'Neither retried nor thrown.');
+        $this->assertSame(0, $this->sleeper->count());
+        $this->assertSame([], $store->writes);
+        $this->assertSame([], $store->reads);
+        $this->assertSame(0, $lockFactory->acquired);
+    }
+
+    public function test_bucket_option_shares_state_between_routes(): void
+    {
+        $handler = $this->handler($this->store());
+        $exhausted = $this->responder(new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '10']));
+        $shared = ['rate_limit' => ['bucket' => 'bulk-writes']];
+
+        $handler->handle($exhausted, new Request('POST', 'https://api.test/users'), $shared)->wait();
+
+        // A route that does not name the bucket keeps its own state, and the
+        // named bucket is still scoped to the identity that spent it ...
+        $handler->handle($exhausted, new Request('GET', 'https://api.test/users'), [])->wait();
+        $handler->handle($exhausted, new Request('PUT', 'https://api.test/orders', ['Authorization' => 'Bot other']), $shared)->wait();
+        $this->assertSame(0, $this->sleeper->count());
+
+        // ... while any other route naming it waits on the spent bucket.
+        $handler->handle($exhausted, new Request('DELETE', 'https://api.test/orders/1'), $shared)->wait();
+
+        $this->assertSame(1, $this->sleeper->count());
+        $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_identity_option_isolates_state_without_storing_it_raw(): void
+    {
+        $store = new SpyStore($this->store());
+        $lockFactory = new SpyLockFactory();
+        $handler = $this->handler($store, new Options(
+            globalLimit: new GlobalLimit(maxRequests: 10, windowSeconds: 1),
+            invalidRequestLimit: new InvalidRequestLimit(),
+        ), lockFactory: $lockFactory);
+        // One credential for every call: only the identity option tells them apart.
+        $request = new Request('GET', 'https://api.test/users', ['Authorization' => 'Bot shared']);
+        $exhausted = $this->responder(new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '10']));
+
+        $handler->handle($exhausted, $request, ['rate_limit' => ['identity' => 'tenant-a']])->wait();
+        $handler->handle($exhausted, $request, ['rate_limit' => ['identity' => 'tenant-b']])->wait();
+        $handler->handle($exhausted, $request, [])->wait();
+        $this->assertSame(0, $this->sleeper->count());
+
+        $handler->handle($exhausted, $request, ['rate_limit' => ['identity' => 'tenant-a']])->wait();
+        $this->assertSame(1, $this->sleeper->count());
+
+        $keys = [...$store->keys(), ...$lockFactory->keys];
+        $this->assertNotEmpty($keys);
+        foreach ($keys as $key) {
+            $this->assertStringNotContainsString('tenant-', $key);
+        }
+    }
+
+    public function test_max_delay_option_throws_instead_of_sleeping(): void
+    {
+        $store = $this->store();
+        $request = new Request('GET', 'https://api.test/search');
+        $this->handler($store)->handle(
+            $this->responder(new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '10'])),
+            $request,
+            [],
+        )->wait();
+
+        try {
+            $this->handler($store)->handle($this->unreachable(), $request, ['rate_limit' => ['max_delay' => 0]])->wait();
+            $this->fail('The wait should have been refused.');
+        } catch (RateLimitDelayExceededException $e) {
+            $this->assertEqualsWithDelta(11.0, $e->retryAfter, 0.001);
+        }
+
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_max_delay_option_replaces_the_configured_cap(): void
+    {
+        $request = new Request('GET', 'https://api.test/reports');
+        $exhausted = $this->responder(new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '10']));
+        $handler = $this->handler($this->store(), new Options(maxDelaySeconds: 5));
+
+        $handler->handle($exhausted, $request, [])->wait();
+
+        // Each wait is 11s: over the configured 5s cap, within the overrides.
+        $handler->handle($exhausted, $request, ['rate_limit' => ['max_delay' => null]])->wait();
+        $handler->handle($exhausted, $request, ['rate_limit' => ['max_delay' => 30]])->wait();
+        $this->assertSame(2, $this->sleeper->count());
+
+        $this->expectException(RateLimitDelayExceededException::class);
+        $handler->handle($exhausted, $request, [])->wait();
+    }
+
+    public function test_max_retries_option_zero_returns_the_429(): void
+    {
+        $handler = $this->handler($this->store(), new Options(maxRetries: 3, throwOnRateLimit: false));
+
+        $response = $handler->handle(
+            $this->queue(new Response(429, ['Retry-After' => '2'])),
+            new Request('GET', 'https://api.test/users'),
+            ['rate_limit' => ['max_retries' => 0]],
+        )->wait();
+
+        $this->assertSame(429, $response->getStatusCode());
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_max_retries_option_zero_throws_when_configured_to(): void
+    {
+        $handler = $this->handler($this->store(), new Options(maxRetries: 3));
+
+        try {
+            $handler->handle(
+                $this->queue(new Response(429, ['Retry-After' => '2'])),
+                new Request('GET', 'https://api.test/users'),
+                ['rate_limit' => ['max_retries' => 0]],
+            )->wait();
+            $this->fail('The 429 should have been thrown.');
+        } catch (RateLimitExceededException $e) {
+            $this->assertSame(429, $e->getResponse()?->getStatusCode());
+        }
+
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_max_retries_option_can_raise_the_configured_limit(): void
+    {
+        $handler = $this->handler($this->store(), new Options(maxRetries: 0, safetyBufferSeconds: 0));
+
+        $response = $handler->handle(
+            $this->queue(
+                new Response(429, ['Retry-After' => '1']),
+                new Response(429, ['Retry-After' => '2']),
+                new Response(200),
+            ),
+            new Request('GET', 'https://api.test/users'),
+            ['rate_limit' => ['max_retries' => 2]],
+        )->wait();
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame([1.0, 2.0], $this->sleeper->sleeps);
+    }
+
+    public function test_rate_limit_option_is_not_passed_to_the_next_handler(): void
+    {
+        $received = [];
+        $next = static function (RequestInterface $request, array $options) use (&$received): ResponseInterface {
+            $received[] = $options;
+
+            return new Response(200);
+        };
+        $handler = $this->handler($this->store());
+        $request = new Request('GET', 'https://api.test/users');
+
+        $handler->handle($next, $request, ['timeout' => 5, 'rate_limit' => ['max_retries' => 1]])->wait();
+        $handler->handle($next, $request, ['timeout' => 5, 'rate_limit' => ['enabled' => false]])->wait();
+
+        $this->assertSame([['timeout' => 5], ['timeout' => 5]], $received);
+    }
+
+    public function test_invalid_rate_limit_option_throws_before_sending(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Unknown "rate_limit" request option "max_delays"');
+
+        $this->handler($this->store())->handle(
+            $this->unreachable(),
+            new Request('GET', 'https://api.test/users'),
+            ['rate_limit' => ['max_delays' => 0]],
+        )->wait();
+    }
+
     private function store(): InMemoryStore
     {
         return new InMemoryStore($this->clock);
@@ -987,6 +1185,13 @@ final class RateLimitHandlerTest extends TestCase
     private function responder(ResponseInterface $response): callable
     {
         return static fn (RequestInterface $request, array $options): ResponseInterface => $response;
+    }
+
+    private function unreachable(): callable
+    {
+        return static function (RequestInterface $request, array $options): ResponseInterface {
+            TestCase::fail('The request should not have been sent.');
+        };
     }
 
     private function queue(ResponseInterface ...$responses): callable

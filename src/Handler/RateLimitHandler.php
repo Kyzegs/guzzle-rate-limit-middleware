@@ -10,6 +10,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\InvalidRequestLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\RequestOptions;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
@@ -57,6 +58,9 @@ use Throwable;
  * re-read the shared state once the time has passed, and without an event
  * loop there is nothing to hang that re-read on. Transfers run concurrently;
  * waiting for an exhausted bucket still blocks.
+ *
+ * A request can adjust or bypass all of this through the "rate_limit" request
+ * option; see {@see RequestOptions}.
  *
  * Persisting through the injected {@see StoreInterface} is what makes rate
  * limiting work across separate requests/processes, not just within one call.
@@ -141,14 +145,22 @@ final class RateLimitHandler implements HandlerInterface
     public function handle(callable $handler, RequestInterface $request, array $options): PromiseInterface
     {
         try {
-            $identity = $this->identityResolver->resolve($request);
+            $overrides = RequestOptions::fromArray($options[RequestOptions::KEY] ?? null, $this->options);
+            // Ours alone; nothing further down the stack has a use for it.
+            unset($options[RequestOptions::KEY]);
+
+            if (! $overrides->enabled) {
+                return Create::promiseFor($handler($request, $options));
+            }
+
+            $identity = $this->identity($request, $overrides);
             $this->enforceInvalidBudget($identity);
-            $routeKey = $identity . ':' . $this->resolver->resolve($request);
+            $routeKey = $identity . ':' . ($overrides->bucket ?? $this->resolver->resolve($request));
             $major = $this->resolver instanceof MajorParameterAwareInterface
                 ? $this->resolver->majorParameters($request)
                 : '';
 
-            return $this->attempt($handler, $request, $options, $identity, $routeKey, $major, 0);
+            return $this->attempt($handler, $request, $options, $overrides, $identity, $routeKey, $major, 0);
         } catch (Throwable $e) {
             return Create::rejectionFor($e);
         }
@@ -168,6 +180,7 @@ final class RateLimitHandler implements HandlerInterface
         callable $handler,
         RequestInterface $request,
         array $options,
+        RequestOptions $overrides,
         string $identity,
         string $routeKey,
         string $major,
@@ -177,16 +190,16 @@ final class RateLimitHandler implements HandlerInterface
 
         $probing = $this->probes[$effectiveKey] ?? null;
         if ($probing !== null) {
-            $resume = fn (): PromiseInterface => $this->attempt($handler, $request, $options, $identity, $routeKey, $major, $tries);
+            $resume = fn (): PromiseInterface => $this->attempt($handler, $request, $options, $overrides, $identity, $routeKey, $major, $tries);
 
             return $probing->then($resume, $resume);
         }
 
-        $probe = $this->reserveBucketCapacity($effectiveKey);
+        $probe = $this->reserveBucketCapacity($effectiveKey, $overrides);
 
         try {
-            $this->clientLimiter->reserve($request, $identity, $routeKey);
-            $this->reserveGlobalCapacity($request, $identity);
+            $this->clientLimiter->reserve($request, $identity, $routeKey, fn (float $delay): float => $this->withMargin($delay, $overrides));
+            $this->reserveGlobalCapacity($request, $identity, $overrides);
 
             $transfer = Create::promiseFor($handler($request, $options));
         } catch (Throwable $e) {
@@ -223,13 +236,13 @@ final class RateLimitHandler implements HandlerInterface
         }
 
         return $recorded->then(
-            function (ResponseInterface $response) use ($handler, $request, $options, $identity, $routeKey, $major, $tries): ResponseInterface|PromiseInterface {
-                $delay = $this->retryStrategy->retryDelay($request, $response, $tries + 1, $this->hintedDelay($response));
+            function (ResponseInterface $response) use ($handler, $request, $options, $overrides, $identity, $routeKey, $major, $tries): ResponseInterface|PromiseInterface {
+                $delay = $this->retryDelay($request, $response, $tries, $overrides);
 
                 if ($delay !== null) {
-                    $this->sleepForRetry($request, $response, ++$tries, $delay);
+                    $this->sleepForRetry($request, $response, ++$tries, $delay, $overrides);
 
-                    return $this->attempt($handler, $request, $options, $identity, $routeKey, $major, $tries);
+                    return $this->attempt($handler, $request, $options, $overrides, $identity, $routeKey, $major, $tries);
                 }
 
                 $this->throwIfRateLimited($request, $response);
@@ -237,6 +250,20 @@ final class RateLimitHandler implements HandlerInterface
                 return $response;
             },
         );
+    }
+
+    /**
+     * The identity that scopes every piece of state this request touches.
+     *
+     * One supplied per request is fingerprinted the way
+     * {@see AuthorizationIdentityResolver} fingerprints credentials, so a
+     * tenant id or token passed as the identity is never used in the clear.
+     */
+    private function identity(RequestInterface $request, RequestOptions $overrides): string
+    {
+        return $overrides->identity !== null
+            ? hash('sha256', $overrides->identity)
+            : $this->identityResolver->resolve($request);
     }
 
     /**
@@ -252,7 +279,7 @@ final class RateLimitHandler implements HandlerInterface
      * be reserved until a response reveals it, so that one request goes alone
      * and the caller releases the lock once it has landed.
      */
-    private function reserveBucketCapacity(string $effectiveKey): ?LockInterface
+    private function reserveBucketCapacity(string $effectiveKey, RequestOptions $overrides): ?LockInterface
     {
         $slept = false;
 
@@ -290,7 +317,7 @@ final class RateLimitHandler implements HandlerInterface
                     return null;
                 }
 
-                $delay = $this->withMargin($rateLimit->secondsUntilReset($this->clock));
+                $delay = $this->withMargin($rateLimit->secondsUntilReset($this->clock), $overrides);
             } finally {
                 if (! $keepLock) {
                     $lock->release();
@@ -421,6 +448,24 @@ final class RateLimitHandler implements HandlerInterface
     }
 
     /**
+     * A request's own max_retries replaces the default strategy's count. A
+     * strategy passed in keeps its own rules, so the override can only stop it
+     * sooner.
+     */
+    private function retryDelay(RequestInterface $request, ResponseInterface $response, int $tries, RequestOptions $overrides): ?float
+    {
+        if ($overrides->retriesOverridden && $tries >= $overrides->maxRetries) {
+            return null;
+        }
+
+        $strategy = $overrides->retriesOverridden && $this->retryLimit !== null
+            ? new StatusCodeRetryStrategy($overrides->maxRetries, $this->options->retryStatusCodes)
+            : $this->retryStrategy;
+
+        return $strategy->retryDelay($request, $response, $tries + 1, $this->hintedDelay($response));
+    }
+
+    /**
      * The resolver's reading of how long the response asks us to wait, for
      * the retry strategy to go on. A success is never a rate limit, and some
      * resolvers parse the body to find out, so only errors are asked.
@@ -430,9 +475,14 @@ final class RateLimitHandler implements HandlerInterface
         return $response->getStatusCode() >= 400 ? $this->retryAfter($response) : 0.0;
     }
 
-    private function sleepForRetry(RequestInterface $request, ResponseInterface $response, int $tries, float $delay): void
-    {
-        $delay = $this->withMargin(max(0.0, $delay));
+    private function sleepForRetry(
+        RequestInterface $request,
+        ResponseInterface $response,
+        int $tries,
+        float $delay,
+        RequestOptions $overrides,
+    ): void {
+        $delay = $this->withMargin(max(0.0, $delay), $overrides);
         $global = $this->isGlobal($response);
 
         $this->logger->warning(sprintf(
@@ -441,7 +491,7 @@ final class RateLimitHandler implements HandlerInterface
             $request->getMethod(),
             (string) $request->getUri(),
             $global ? ' (global rate limit)' : '',
-            $this->retryLimit === null ? (string) $tries : $tries . '/' . $this->retryLimit,
+            $this->retryLimit === null ? (string) $tries : $tries . '/' . $overrides->maxRetries,
             $delay,
         ));
 
@@ -489,7 +539,7 @@ final class RateLimitHandler implements HandlerInterface
             && (JsonBody::decode($response)['global'] ?? false) === true;
     }
 
-    private function withMargin(float $delay): float
+    private function withMargin(float $delay, ?RequestOptions $overrides = null): float
     {
         $delay += $this->options->safetyBufferSeconds;
 
@@ -497,14 +547,16 @@ final class RateLimitHandler implements HandlerInterface
             $delay += $delay * ($this->options->jitterPercent / 100.0) * (mt_rand() / mt_getrandmax());
         }
 
-        if ($this->options->maxDelaySeconds !== null && $delay > $this->options->maxDelaySeconds) {
+        $maxDelay = $overrides !== null ? $overrides->maxDelaySeconds : $this->options->maxDelaySeconds;
+
+        if ($maxDelay !== null && $delay > $maxDelay) {
             throw new RateLimitDelayExceededException($delay);
         }
 
         return $delay;
     }
 
-    private function reserveGlobalCapacity(RequestInterface $request, string $identity): void
+    private function reserveGlobalCapacity(RequestInterface $request, string $identity, RequestOptions $overrides): void
     {
         $config = $this->options->globalLimit;
         if ($config === null || $this->isExemptFromGlobalLimit($config, $request)) {
@@ -536,7 +588,7 @@ final class RateLimitHandler implements HandlerInterface
             } finally {
                 $lock->release();
             }
-            $this->sleeper->sleep($this->withMargin($delay));
+            $this->sleeper->sleep($this->withMargin($delay, $overrides));
         }
     }
 

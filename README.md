@@ -354,6 +354,34 @@ State lives in the configured store under hashed keys, so processes sharing a
 store share the budgets; add a lock factory if they run concurrently. Limits
 that differ only in `appliesTo` need distinct names, or they share one budget.
 
+## Per-request options
+
+Adjust or bypass the middleware for a single call with the `rate_limit`
+request option:
+
+```php
+$client->get('/search', ['rate_limit' => ['max_delay' => 0]]);        // fail fast instead of sleeping
+$client->post('/bulk', ['rate_limit' => ['bucket' => 'bulk-writes']]);  // share one bucket across routes
+$client->get('/health', ['rate_limit' => ['enabled' => false]]);        // bypass the middleware entirely
+
+// per-tenant state; give up on the first 429
+$client->get('/items', ['rate_limit' => ['identity' => 'tenant-42', 'max_retries' => 0]]);
+```
+
+| Key | Type | Effect |
+|-----|------|--------|
+| `enabled` | `bool` | `false` sends the request straight through: no waiting, retries, budgets or stored state. |
+| `bucket` | `string` | Replaces the resolved bucket, so different routes can share one limit. Still scoped by identity. |
+| `identity` | `string` | Replaces the resolved identity (the `Authorization` fingerprint by default), e.g. with a tenant id. Fingerprinted the same way, never stored raw. |
+| `max_delay` | number or `null` | Overrides `Options::$maxDelaySeconds`. `0` throws `RateLimitDelayExceededException` instead of waiting; `null` lifts the cap. |
+| `max_retries` | `int` | Overrides `Options::$maxRetries`. |
+
+Unknown keys, wrong types and negative numbers throw an `InvalidArgumentException`,
+and the option is removed before the request reaches the next handler. Set it in
+the client config (`new Client(['handler' => $stack, 'rate_limit' => [...]])`) to
+apply it to every request; a per-request `rate_limit` then replaces it as a whole,
+since Guzzle merges options shallowly.
+
 ## Bucket resolution
 
 Requests are grouped into buckets that share a rate limit. The default

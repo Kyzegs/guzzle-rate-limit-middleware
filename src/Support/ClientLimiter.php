@@ -63,7 +63,7 @@ final class ClientLimiter
      * Block until every limit that applies to the request has room, then
      * take one slot from each of them.
      */
-    public function reserve(RequestInterface $request, string $identity, string $routeKey): void
+    public function reserve(RequestInterface $request, string $identity, string $routeKey, ?Closure $margin = null): void
     {
         $limits = $this->applicable($request, $identity, $routeKey);
 
@@ -111,7 +111,7 @@ final class ClientLimiter
                 }
             }
 
-            $delay = ($this->margin)($delay);
+            $delay = ($margin ?? $this->margin)($delay);
 
             $this->logger->debug(sprintf(
                 'Client-side limit %s reached; sleeping %.2fs before checking again.',
