@@ -6,7 +6,9 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Handler;
 
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Promise\PromiseInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\InvalidRequestLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
@@ -309,7 +311,7 @@ final class RateLimitHandler implements HandlerInterface
     private function reserveGlobalCapacity(RequestInterface $request, string $identity): void
     {
         $config = $this->options->globalLimit;
-        if ($config === null || $this->isInteractionCallback($request)) {
+        if ($config === null || $this->isExemptFromGlobalLimit($config, $request)) {
             return;
         }
 
@@ -368,7 +370,7 @@ final class RateLimitHandler implements HandlerInterface
     {
         $config = $this->options->invalidRequestLimit;
         $status = $response->getStatusCode();
-        if ($config === null || ! in_array($status, $config->statusCodes, true) || ($status === 429 && $this->scope($response) === 'shared')) {
+        if ($config === null || ! in_array($status, $config->statusCodes, true) || ($status === 429 && $this->hasIgnoredScope($response, $config))) {
             return;
         }
         $key = 'invalid:' . hash('sha256', $identity);
@@ -386,14 +388,36 @@ final class RateLimitHandler implements HandlerInterface
         }
     }
 
-    private function scope(ResponseInterface $response): string
+    /**
+     * A 429 in some scopes says nothing about this client misbehaving (Discord's
+     * "shared": another caller spent a per-resource allowance). Which scopes is
+     * the API's call, so they come from the configuration; a response without a
+     * scope header has no scope and always counts.
+     */
+    private function hasIgnoredScope(ResponseInterface $response, InvalidRequestLimit $config): bool
     {
-        return strtolower((string) HeaderParser::value($response, $this->headers->scope, 'user'));
+        $scope = HeaderParser::value($response, $this->headers->scope);
+
+        return $scope !== null
+            && in_array(strtolower((string) $scope), array_map(strtolower(...), $config->ignoredScopes), true);
     }
 
-    private function isInteractionCallback(RequestInterface $request): bool
+    /**
+     * Routes an API keeps outside its global budget (Discord's interaction
+     * callbacks, for one) are listed on the configuration rather than known
+     * here, so one API's exemptions never leak into another's budget.
+     */
+    private function isExemptFromGlobalLimit(GlobalLimit $config, RequestInterface $request): bool
     {
-        return preg_match('#/interactions/[^/]+/[^/]+/callback$#', $request->getUri()->getPath()) === 1;
+        $path = $request->getUri()->getPath();
+
+        foreach ($config->exemptPaths as $pattern) {
+            if (preg_match($pattern, $path) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function ttlFor(RateLimit $rateLimit): int

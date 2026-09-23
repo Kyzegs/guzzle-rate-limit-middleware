@@ -101,19 +101,35 @@ final class RateLimitMiddleware
         );
     }
 
+    /**
+     * Discord headers, bucket-hash discovery and major parameters, a global
+     * budget and an invalid-request budget.
+     *
+     * Interaction callbacks stay exempt from the global budget even when
+     * $options carries a GlobalLimit of your own: Discord never counts them, so
+     * the preset adds {@see GlobalLimit::discord()}'s exemptions to whatever
+     * limit it is given rather than trusting every caller to repeat them.
+     *
+     * $clock is shared with the bucket resolver, which dates messages to pick
+     * the old-message deletion bucket, so both run on the same time.
+     */
     public static function discord(
         ?StoreInterface $store = null,
         ?LoggerInterface $logger = null,
         ?LockFactoryInterface $lockFactory = null,
         Options $options = new Options(globalLimit: new GlobalLimit(), invalidRequestLimit: new InvalidRequestLimit()),
+        ?ClockInterface $clock = null,
     ): self {
+        $clock ??= new SystemClock();
+
         return self::create(
-            options: $options,
+            options: self::withDiscordExemptions($options),
             headers: Headers::discord(),
             store: $store,
             logger: $logger,
-            resolver: new DiscordBucketResolver(),
+            resolver: new DiscordBucketResolver($clock),
             lockFactory: $lockFactory,
+            clock: $clock,
             identityResolver: new AuthorizationIdentityResolver(),
             retryAfterResolver: new DiscordRetryAfterResolver(),
         );
@@ -132,6 +148,27 @@ final class RateLimitMiddleware
     public static function ietf(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
     {
         return self::create(headers: Headers::ietf(), store: $store, logger: $logger);
+    }
+
+    /**
+     * Add Discord's global-budget exemptions that $options' GlobalLimit is
+     * missing, keeping its own budget and exemptions.
+     */
+    private static function withDiscordExemptions(Options $options): Options
+    {
+        $globalLimit = $options->globalLimit;
+        if ($globalLimit === null) {
+            return $options;
+        }
+
+        $missing = array_diff(GlobalLimit::discord()->exemptPaths, $globalLimit->exemptPaths);
+        if ($missing === []) {
+            return $options;
+        }
+
+        return $options->withGlobalLimit(
+            $globalLimit->withExemptPaths([...$globalLimit->exemptPaths, ...array_values($missing)]),
+        );
     }
 
     /**
