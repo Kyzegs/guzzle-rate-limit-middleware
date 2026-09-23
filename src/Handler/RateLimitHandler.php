@@ -16,11 +16,13 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\MajorParameterAwareInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RateLimitParserInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\InvalidRequestLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
+use Kyzegs\GuzzleRateLimitMiddleware\Parser\HeaderRateLimitParser;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
@@ -35,8 +37,9 @@ use Psr\Log\LoggerInterface;
  *
  * Before each request it reads the persisted bucket state and, if the bucket is
  * exhausted, sleeps until the window resets. After each request it persists the
- * fresh state from the response headers. A 429 that slips through is retried
- * (honouring Retry-After) up to Options::$maxRetries, then optionally throws.
+ * fresh state the {@see RateLimitParserInterface} reads from the response. A
+ * 429 that slips through is retried (honouring Retry-After) up to
+ * Options::$maxRetries, then optionally throws.
  *
  * Persisting through the injected {@see StoreInterface} is what makes rate
  * limiting work across separate requests/processes, not just within one call.
@@ -44,6 +47,8 @@ use Psr\Log\LoggerInterface;
 final class RateLimitHandler implements HandlerInterface
 {
     private readonly BucketKeyResolver $bucketKeys;
+
+    private readonly RateLimitParserInterface $parser;
 
     public function __construct(
         private readonly Options $options,
@@ -56,8 +61,10 @@ final class RateLimitHandler implements HandlerInterface
         private readonly SleeperInterface $sleeper,
         private readonly IdentityResolverInterface $identityResolver = new AuthorizationIdentityResolver(),
         private readonly RetryAfterResolverInterface $retryAfterResolver = new DefaultRetryAfterResolver(),
+        ?RateLimitParserInterface $parser = null,
     ) {
         $this->bucketKeys = new BucketKeyResolver($this->store);
+        $this->parser = $parser ?? new HeaderRateLimitParser($this->headers);
     }
 
     /**
@@ -171,6 +178,8 @@ final class RateLimitHandler implements HandlerInterface
      * Update the stored state from the response, re-keying via bucket-hash
      * discovery when the API reveals a bucket. Returns the (possibly new)
      * effective key.
+     *
+     * A response the parser finds nothing in leaves the stored state alone.
      */
     private function persist(
         ResponseInterface $response,
@@ -178,10 +187,18 @@ final class RateLimitHandler implements HandlerInterface
         string $major,
         string $effectiveKey,
     ): string {
-        $rateLimit = RateLimit::fromResponse($response, $this->headers, $this->clock);
+        $rateLimit = $this->parser->parse($response, $this->clock);
 
-        if ($this->headers->needsToCheckBucketHeader() && $rateLimit->bucketHash !== null) {
-            $effectiveKey = $this->bucketKeys->observe($routeKey, $rateLimit->bucketHash, $major);
+        if ($rateLimit === null) {
+            return $effectiveKey;
+        }
+
+        // Discovery is switched on by Headers, not by the parser, so a parser
+        // that only knows the allowance still gets re-keyed by the bucket header.
+        $bucketHash = $rateLimit->bucketHash ?? HeaderParser::value($response, $this->headers->bucket);
+
+        if ($this->headers->needsToCheckBucketHeader() && $bucketHash !== null) {
+            $effectiveKey = $this->bucketKeys->observe($routeKey, (string) $bucketHash, $major);
         }
 
         $rateLimit = $this->lowestSeen($effectiveKey, $rateLimit);

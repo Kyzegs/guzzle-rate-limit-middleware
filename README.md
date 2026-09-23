@@ -8,7 +8,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 
 ## Features
 
-- 🔧 **Configurable headers** — works with any API (Discord, GitHub, Twitter, the IETF `RateLimit-*` draft, or your own).
+- 🔧 **Configurable headers and parsers** — works with any API (Discord, GitHub, Twitter, Shopify, the IETF `RateLimit` draft, or your own).
 - 💾 **Cross-process state** — share rate-limit state via PSR-16 (Redis, Memcached, Laravel/Symfony cache), the filesystem, or in-memory.
 - ⏳ **Pre-emptive delays** — sleeps until a bucket resets instead of failing.
 - 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws.
@@ -44,9 +44,21 @@ The default middleware reads the standard `X-RateLimit-*` headers and keeps stat
 ```php
 RateLimitMiddleware::github();   // X-RateLimit-* headers
 RateLimitMiddleware::twitter();  // x-rate-limit-* headers
-RateLimitMiddleware::ietf();     // RateLimit-* (IETF draft)
+RateLimitMiddleware::ietf();     // RateLimit / RateLimit-Policy (IETF draft), or legacy RateLimit-*
+RateLimitMiddleware::shopify();  // X-Shopify-Shop-Api-Call-Limit leaky bucket
 RateLimitMiddleware::discord();  // Discord headers + bucket-hash discovery
 ```
+
+The IETF preset understands the draft's structured fields — the current
+`RateLimit: "default";r=50;t=30` with its `RateLimit-Policy`, the older
+`RateLimit: limit=100, remaining=50, reset=30` — as well as the separate
+`RateLimit-Limit`/`-Remaining`/`-Reset` headers. When a response lists several
+policies, it tracks whichever runs out first.
+
+The Shopify preset reads `X-Shopify-Shop-Api-Call-Limit: 32/40`, keeps one
+bucket per shop (every REST endpoint drains the same one), and retries a `429`
+after its `Retry-After`. It assumes the standard 2 requests/second leak rate,
+which only errs on the slow side for faster plans.
 
 The Discord preset also enables a cross-process 50 request/second global
 budget, isolates all state by a one-way authorization fingerprint, accepts the
@@ -124,6 +136,53 @@ $middleware = RateLimitMiddleware::create(headers: $headers);
 ```
 
 `reset` values below the year-2000 epoch are treated as relative seconds; larger values as absolute UNIX timestamps.
+
+## Custom parsers
+
+`Headers` feeds the default `HeaderRateLimitParser`, which fits APIs that send
+one number per header. For anything else, swap the parser. The library also
+ships `IetfRateLimitParser` (used by `ietf()`) and `FractionHeaderParser` for
+"used/limit" leaky buckets:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Parser\FractionHeaderParser;
+
+$middleware = RateLimitMiddleware::create(
+    parser: new FractionHeaderParser('X-Api-Call-Limit', leakPerSecond: 4.0),
+);
+```
+
+Or implement `RateLimitParserInterface`. Return `null` when a response carries
+no rate-limit information; the stored state is then left as it is:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RateLimitParserInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
+use Psr\Http\Message\ResponseInterface;
+
+// X-Quota: 12 left, resets in 30s
+final class QuotaParser implements RateLimitParserInterface
+{
+    public function parse(ResponseInterface $response, ClockInterface $clock): ?RateLimit
+    {
+        if (preg_match('/^(\d+) left, resets in (\d+)s$/', $response->getHeaderLine('X-Quota'), $m) !== 1) {
+            return null;
+        }
+
+        return new RateLimit(
+            limit: 0,                             // unknown
+            remaining: (int) $m[1],
+            reset: $clock->now() + (int) $m[2],   // absolute UNIX timestamp
+        );
+    }
+}
+
+$middleware = RateLimitMiddleware::create(parser: new QuotaParser());
+```
+
+A parser only replaces how limit, remaining and reset are read. `Headers`
+still names the `Retry-After`, bucket, global and scope headers.
 
 ## Behaviour options
 
