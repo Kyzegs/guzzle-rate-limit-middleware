@@ -7,6 +7,8 @@ require __DIR__ . '/../vendor/autoload.php';
 use GuzzleHttp\Client;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Promise\Create;
+use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Psr7\Response;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
@@ -19,6 +21,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\UsleepSleeper;
 use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
 use Psr\Log\NullLogger;
 
 /**
@@ -31,13 +34,19 @@ final class TimingHandler implements HandlerInterface
     {
     }
 
-    public function handle(callable $handler, RequestInterface $request, array $options): mixed
+    public function handle(callable $handler, RequestInterface $request, array $options): PromiseInterface
     {
         $start = microtime(true);
-        $result = $this->inner->handle($handler, $request, $options);
-        fprintf(STDERR, "%s took %.3fs\n", $request->getUri(), microtime(true) - $start);
 
-        return $result;
+        // The inner handler returns before the transfer completes, so time it
+        // from the promise rather than around the call.
+        return Create::promiseFor($this->inner->handle($handler, $request, $options))->then(
+            static function (ResponseInterface $response) use ($request, $start): ResponseInterface {
+                fprintf(STDERR, "%s took %.3fs\n", $request->getUri(), microtime(true) - $start);
+
+                return $response;
+            },
+        );
     }
 }
 

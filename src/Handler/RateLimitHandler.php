@@ -29,14 +29,25 @@ use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Log\LoggerInterface;
+use Throwable;
 
 /**
- * Blocking rate-limit handler.
+ * Promise-based rate-limit handler.
  *
  * Before each request it reads the persisted bucket state and, if the bucket is
- * exhausted, sleeps until the window resets. After each request it persists the
- * fresh state from the response headers. A 429 that slips through is retried
- * (honouring Retry-After) up to Options::$maxRetries, then optionally throws.
+ * exhausted, sleeps until the window resets. Once the response lands it
+ * persists the fresh state from the response headers. A 429 that slips through
+ * is retried (honouring Retry-After) up to Options::$maxRetries, then optionally
+ * rejects with RateLimitExceededException.
+ *
+ * The transfer itself is never waited on: the bookkeeping and any retry are
+ * chained onto the inner handler's promise, so getAsync(), Pool and
+ * Promise\Utils::all() keep their requests in flight together. The waits are
+ * another matter. An exhausted bucket, a spent global budget and a 429's retry
+ * delay still block through the {@see SleeperInterface}, because each must
+ * re-read the shared state once the time has passed, and without an event
+ * loop there is nothing to hang that re-read on. Transfers run concurrently;
+ * waiting for an exhausted bucket still blocks.
  *
  * Persisting through the injected {@see StoreInterface} is what makes rate
  * limiting work across separate requests/processes, not just within one call.
@@ -44,6 +55,20 @@ use Psr\Log\LoggerInterface;
 final class RateLimitHandler implements HandlerInterface
 {
     private readonly BucketKeyResolver $bucketKeys;
+
+    /**
+     * Probes in flight from this handler, by bucket key. Each promise settles
+     * once its probe's response has been recorded and its lock released.
+     *
+     * Only a response can reveal an unknown allowance, so the probe goes
+     * alone. Across processes the lock sees to that. Within this one, a
+     * second request must not block on that lock: the probe holding it can
+     * only land once the caller is free to wait on promises again. It queues
+     * behind the probe's promise instead.
+     *
+     * @var array<string, PromiseInterface>
+     */
+    private array $probes = [];
 
     public function __construct(
         private readonly Options $options,
@@ -61,47 +86,109 @@ final class RateLimitHandler implements HandlerInterface
     }
 
     /**
+     * Always returns a promise, never the response itself. Anything that stops
+     * the request before it is sent (a spent invalid-request budget, a wait
+     * longer than maxDelaySeconds) rejects it, the same way a failed transfer
+     * would.
+     *
      * @param array<string, mixed> $options
      */
-    public function handle(callable $handler, RequestInterface $request, array $options): mixed
+    public function handle(callable $handler, RequestInterface $request, array $options): PromiseInterface
     {
-        $identity = $this->identityResolver->resolve($request);
-        $this->enforceInvalidBudget($identity);
-        $routeKey = $identity . ':' . $this->resolver->resolve($request);
-        $major = $this->resolver instanceof MajorParameterAwareInterface
-            ? $this->resolver->majorParameters($request)
-            : '';
+        try {
+            $identity = $this->identityResolver->resolve($request);
+            $this->enforceInvalidBudget($identity);
+            $routeKey = $identity . ':' . $this->resolver->resolve($request);
+            $major = $this->resolver instanceof MajorParameterAwareInterface
+                ? $this->resolver->majorParameters($request)
+                : '';
+
+            return $this->attempt($handler, $request, $options, $identity, $routeKey, $major, 0);
+        } catch (Throwable $e) {
+            return Create::rejectionFor($e);
+        }
+    }
+
+    /**
+     * One pass through the bucket: claim capacity, hand the request on, and
+     * chain the bookkeeping onto the transfer instead of waiting for it.
+     *
+     * A retry re-enters here from inside that chain, so the bucket key is
+     * resolved afresh on every pass: the previous response may have revealed
+     * a bucket hash that moves the request to a different bucket.
+     *
+     * @param array<string, mixed> $options
+     */
+    private function attempt(
+        callable $handler,
+        RequestInterface $request,
+        array $options,
+        string $identity,
+        string $routeKey,
+        string $major,
+        int $tries,
+    ): PromiseInterface {
         $effectiveKey = $this->bucketKeys->effective($routeKey, $major);
 
-        $tries = 0;
+        $probing = $this->probes[$effectiveKey] ?? null;
+        if ($probing !== null) {
+            $resume = fn (): PromiseInterface => $this->attempt($handler, $request, $options, $identity, $routeKey, $major, $tries);
 
-        while (true) {
-            $probe = $this->reserveBucketCapacity($effectiveKey);
+            return $probing->then($resume, $resume);
+        }
 
-            try {
-                $this->reserveGlobalCapacity($request, $identity);
+        $probe = $this->reserveBucketCapacity($effectiveKey);
 
-                $promise = $handler($request, $options);
-                $isPromise = $promise instanceof PromiseInterface;
-                $response = $isPromise ? $promise->wait() : $promise;
+        try {
+            $this->reserveGlobalCapacity($request, $identity);
 
-                $effectiveKey = $this->persist($response, $routeKey, $major, $effectiveKey);
+            $transfer = Create::promiseFor($handler($request, $options));
+        } catch (Throwable $e) {
+            $probe?->release();
+
+            throw $e;
+        }
+
+        $recorded = $transfer->then(
+            function (ResponseInterface $response) use ($routeKey, $major, $effectiveKey, $identity): ResponseInterface {
+                $this->persist($response, $routeKey, $major, $effectiveKey);
                 $this->recordGlobalLimit($response, $identity);
                 $this->recordInvalidRequest($response, $identity);
-            } finally {
-                $probe?->release();
-            }
 
-            if ($this->shouldRetry($response, $tries)) {
-                $this->sleepForRetry($request, $response, ++$tries);
+                return $response;
+            },
+            // Passed on explicitly: without a handler an already-rejected
+            // transfer would come straight back to the caller, settled before
+            // the probe below has been released.
+            static fn (mixed $reason): PromiseInterface => Create::rejectionFor($reason),
+        );
 
-                continue;
-            }
+        if ($probe !== null) {
+            // Chained after the bookkeeping above, so it runs once the response
+            // has been recorded, whether the transfer fulfilled or failed. It
+            // hangs off the transfer rather than the caller's chain so that a
+            // cancelled request still gives the lock back.
+            $release = function () use ($effectiveKey, $probe): void {
+                unset($this->probes[$effectiveKey]);
+                $probe->release();
+            };
 
-            $this->throwIfRateLimited($request, $response);
-
-            return $isPromise ? Create::promiseFor($response) : $response;
+            $this->probes[$effectiveKey] = $transfer->then($release, $release);
         }
+
+        return $recorded->then(
+            function (ResponseInterface $response) use ($handler, $request, $options, $identity, $routeKey, $major, $tries): ResponseInterface|PromiseInterface {
+                if ($this->shouldRetry($response, $tries)) {
+                    $this->sleepForRetry($request, $response, ++$tries);
+
+                    return $this->attempt($handler, $request, $options, $identity, $routeKey, $major, $tries);
+                }
+
+                $this->throwIfRateLimited($request, $response);
+
+                return $response;
+            },
+        );
     }
 
     /**
@@ -169,15 +256,15 @@ final class RateLimitHandler implements HandlerInterface
 
     /**
      * Update the stored state from the response, re-keying via bucket-hash
-     * discovery when the API reveals a bucket. Returns the (possibly new)
-     * effective key.
+     * discovery when the API reveals a bucket. The next attempt picks the new
+     * key up from the store.
      */
     private function persist(
         ResponseInterface $response,
         string $routeKey,
         string $major,
         string $effectiveKey,
-    ): string {
+    ): void {
         $rateLimit = RateLimit::fromResponse($response, $this->headers, $this->clock);
 
         if ($this->headers->needsToCheckBucketHeader() && $rateLimit->bucketHash !== null) {
@@ -187,8 +274,6 @@ final class RateLimitHandler implements HandlerInterface
         $rateLimit = $this->lowestSeen($effectiveKey, $rateLimit);
 
         $this->store->put($effectiveKey, $rateLimit->toArray(), $this->ttlFor($rateLimit));
-
-        return $effectiveKey;
     }
 
     /**
