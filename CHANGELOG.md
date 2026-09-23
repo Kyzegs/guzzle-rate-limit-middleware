@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add a `rate_limit` request option to override `max_delay`, `max_retries`, the bucket or the identity for a single request, or bypass the middleware with `enabled: false`. Invalid values throw `InvalidArgumentException`.
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.
