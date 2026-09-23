@@ -208,7 +208,28 @@ not ordinary throughput.
 ## Testing your integration
 
 The clock and sleeper are injectable, so you can assert delays without real
-waits. See `tests/` — `FakeClock` and `RecordingSleeper` are good starting points.
+waits. The package ships the two test doubles it uses itself:
+
+```php
+use GuzzleHttp\Handler\MockHandler;
+use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
+use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
+use Kyzegs\GuzzleRateLimitMiddleware\Testing\RecordingSleeper;
+
+$clock = new FakeClock(1_700_000_000.0);
+$sleeper = new RecordingSleeper($clock); // advances the clock instead of blocking
+
+$stack = HandlerStack::create(new MockHandler([/* responses */]));
+$stack->push(RateLimitMiddleware::create(
+    store: new InMemoryStore($clock),
+    clock: $clock,
+    sleeper: $sleeper,
+));
+
+// ... send requests, then:
+$sleeper->sleeps;  // every delay requested, in seconds
+$sleeper->total();
+```
 
 ## Development
 

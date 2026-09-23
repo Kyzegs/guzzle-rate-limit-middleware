@@ -9,7 +9,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Store\FilesystemStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\Psr16Store;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\ArrayCache;
-use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\FakeClock;
+use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use PHPUnit\Framework\TestCase;
 
 final class StoreTest extends TestCase

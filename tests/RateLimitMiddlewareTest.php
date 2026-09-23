@@ -11,8 +11,8 @@ use GuzzleHttp\Psr7\Response;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
-use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\FakeClock;
-use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RecordingSleeper;
+use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
+use Kyzegs\GuzzleRateLimitMiddleware\Testing\RecordingSleeper;
 use PHPUnit\Framework\TestCase;
 
 final class RateLimitMiddlewareTest extends TestCase

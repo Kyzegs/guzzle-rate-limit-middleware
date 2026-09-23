@@ -7,7 +7,7 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Tests;
 use GuzzleHttp\Psr7\Response;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
-use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\FakeClock;
+use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use PHPUnit\Framework\TestCase;
 
 final class RateLimitTest extends TestCase
