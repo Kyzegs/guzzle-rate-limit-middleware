@@ -11,7 +11,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 - 🔧 **Configurable headers** — works with any API (Discord, GitHub, Twitter, the IETF `RateLimit-*` draft, or your own).
 - 💾 **Cross-process state** — share rate-limit state via PSR-16 (Redis, Memcached, Laravel/Symfony cache), the filesystem, or in-memory.
 - ⏳ **Pre-emptive delays** — sleeps until a bucket resets instead of failing.
-- 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws.
+- 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws; pluggable strategies add backoff and GitHub's 403 rate limits.
 - 🪣 **Bucket-hash discovery** — adapts to APIs (like Discord) that assign buckets dynamically.
 - 🔒 **Optional locking** — plug in a distributed lock to serialise concurrent callers.
 - 🧪 **Fully testable** — the clock and sleeper are injectable, so timing is deterministic in tests.
@@ -42,7 +42,7 @@ The default middleware reads the standard `X-RateLimit-*` headers and keeps stat
 ### Per-API presets
 
 ```php
-RateLimitMiddleware::github();   // X-RateLimit-* headers
+RateLimitMiddleware::github();   // X-RateLimit-* headers + GitHub's 403/429 retry rules
 RateLimitMiddleware::twitter();  // x-rate-limit-* headers
 RateLimitMiddleware::ietf();     // RateLimit-* (IETF draft)
 RateLimitMiddleware::discord();  // Discord headers + bucket-hash discovery
@@ -135,7 +135,7 @@ $options = new Options(
     maxRetries:          3,      // retries for a request that keeps getting 429
     safetyBufferSeconds: 1.0,    // added to every computed delay (clock skew/latency)
     jitterPercent:       0.0,    // random extra delay, 0-100% of the base delay
-    throwOnRateLimit:    true,   // throw once retries are exhausted on a 429
+    throwOnRateLimit:    true,   // throw once retries are exhausted on a rate limit (a 429 by default)
     maxStoreTtl:         604800, // upper bound for cached bucket state (seconds)
     retryStatusCodes:    [429],  // statuses that trigger a retry
 );
@@ -145,9 +145,64 @@ $middleware = RateLimitMiddleware::create(options: $options);
 // Presets: Options::default(), Options::conservative(), Options::aggressive()
 ```
 
-When retries are exhausted on a `429` and `throwOnRateLimit` is `true`, a
+`maxRetries` and `retryStatusCodes` configure the default retry strategy; see
+[Retry strategies](#retry-strategies) to replace it.
+
+When retries are exhausted on a rate limit (a `429`, unless the retry strategy
+says otherwise) and `throwOnRateLimit` is `true`, a
 `Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException` is thrown
-(carrying the request, response, retry-after seconds and global flag).
+(carrying the request, response, retry-after seconds and global flag). Any
+other status is returned as is once its retries run out.
+
+## Retry strategies
+
+Whether a response is retried, how long to wait first, and whether it counts as
+a rate limit is up to a `RetryStrategyInterface`. The default,
+`StatusCodeRetryStrategy`, retries `retryStatusCodes` up to `maxRetries` times
+and waits as long as `Retry-After` (or the bucket reset) says.
+
+When a response says nothing, that wait is just the safety buffer. Wrap the
+strategy in `ExponentialBackoffRetryStrategy` to back off instead (a wait the
+response does give is left alone):
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Retry\ExponentialBackoffRetryStrategy;
+use Kyzegs\GuzzleRateLimitMiddleware\Retry\StatusCodeRetryStrategy;
+
+$middleware = RateLimitMiddleware::create(
+    retryStrategy: new ExponentialBackoffRetryStrategy(
+        new StatusCodeRetryStrategy(maxRetries: 5, statusCodes: [429, 503]),
+        baseSeconds: 1.0,  // up to 1s, 2s, 4s, … (full jitter)
+        maxSeconds:  60.0,
+    ),
+);
+```
+
+`RateLimitMiddleware::github()` uses `GitHubRetryStrategy`, since GitHub
+answers a rate limit with a `403` as readily as a `429`:
+
+- `x-ratelimit-remaining: 0` (primary limit) waits until `x-ratelimit-reset`;
+- `retry-after` (secondary limit) waits that long;
+- a secondary limit that gives neither waits a minute, then doubles;
+- any other `403` is taken as a permissions error and returned without a retry.
+
+Exhausted `403` rate limits throw `RateLimitExceededException` like a `429`. To
+change the number of retries, build it yourself:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
+use Kyzegs\GuzzleRateLimitMiddleware\Retry\GitHubRetryStrategy;
+
+$middleware = RateLimitMiddleware::create(
+    headers: Headers::github(),
+    retryStrategy: new GitHubRetryStrategy(maxRetries: 5),
+);
+```
+
+For anything else, implement `RetryStrategyInterface`: return the seconds to
+wait (or `null` to stop) from `retryDelay()`, and say in `isRateLimited()`
+which responses should throw once retries stop. The safety buffer, jitter and
+`maxDelaySeconds` still apply on top.
 
 ## Bucket resolution
 

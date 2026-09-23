@@ -11,11 +11,15 @@ use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryStrategyInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Handler\RateLimitHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Retry\ExponentialBackoffRetryStrategy;
+use Kyzegs\GuzzleRateLimitMiddleware\Retry\GitHubRetryStrategy;
+use Kyzegs\GuzzleRateLimitMiddleware\Retry\StatusCodeRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
@@ -338,6 +342,82 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
     }
 
+    public function test_github_primary_limit_403_is_retried_after_the_reset(): void
+    {
+        $this->clock->set(1_700_000_000.0);
+        $handler = $this->handler($this->store(), new Options(), Headers::github(), retryStrategy: new GitHubRetryStrategy());
+
+        $response = $handler->handle(
+            $this->queue(
+                new Response(403, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '1700000030']),
+                new Response(200, ['X-RateLimit-Remaining' => '4999', 'X-RateLimit-Reset' => '1700003600']),
+            ),
+            new Request('GET', 'https://api.github.com/repos/o/r'),
+            [],
+        );
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame(1, $this->sleeper->count(), 'The retry must not wait out the same reset twice.');
+        $this->assertEqualsWithDelta(31.0, $this->sleeper->sleeps[0], 0.001); // 30s to reset + 1 buffer
+    }
+
+    public function test_github_plain_403_is_returned_untouched(): void
+    {
+        $this->clock->set(1_700_000_000.0);
+        $handler = $this->handler($this->store(), new Options(), Headers::github(), retryStrategy: new GitHubRetryStrategy());
+        $forbidden = new Response(
+            403,
+            ['X-RateLimit-Remaining' => '4999', 'X-RateLimit-Reset' => '1700003600'],
+            '{"message":"Resource not accessible by integration"}',
+        );
+
+        $response = $handler->handle(
+            $this->queue($forbidden),
+            new Request('GET', 'https://api.github.com/repos/o/r'),
+            [],
+        );
+
+        $this->assertSame($forbidden, $response);
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_github_rate_limit_403_throws_once_retries_are_exhausted(): void
+    {
+        $this->clock->set(1_700_000_000.0);
+        $handler = $this->handler($this->store(), new Options(), Headers::github(), retryStrategy: new GitHubRetryStrategy(maxRetries: 1));
+        $limited = new Response(403, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '1700000010']);
+
+        try {
+            $handler->handle($this->responder($limited), new Request('GET', 'https://api.github.com/repos/o/r'), []);
+            $this->fail('Expected RateLimitExceededException.');
+        } catch (RateLimitExceededException $e) {
+            $this->assertSame($limited, $e->getResponse());
+        }
+
+        $this->assertSame(1, $this->sleeper->count());
+    }
+
+    public function test_strategy_delay_gets_the_safety_buffer(): void
+    {
+        $handler = $this->handler(
+            $this->store(),
+            retryStrategy: new ExponentialBackoffRetryStrategy(
+                new StatusCodeRetryStrategy(maxRetries: 2),
+                baseSeconds: 2.0,
+                random: static fn (): float => 1.0,
+            ),
+        );
+
+        $response = $handler->handle(
+            $this->queue(new Response(429), new Response(429), new Response(200)),
+            new Request('GET', 'https://api.test/users'),
+            [],
+        );
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame([3.0, 5.0], $this->sleeper->sleeps); // 2s and 4s backoff + 1 buffer each
+    }
+
     private function store(): InMemoryStore
     {
         return new InMemoryStore($this->clock);
@@ -349,6 +429,7 @@ final class RateLimitHandlerTest extends TestCase
         Headers $headers = new Headers(),
         ?BucketResolverInterface $resolver = null,
         ?LockFactoryInterface $lockFactory = null,
+        ?RetryStrategyInterface $retryStrategy = null,
     ): RateLimitHandler {
         return new RateLimitHandler(
             $options,
@@ -359,6 +440,7 @@ final class RateLimitHandlerTest extends TestCase
             $lockFactory ?? new NullLockFactory(),
             $this->clock,
             $this->sleeper,
+            retryStrategy: $retryStrategy,
         );
     }
 

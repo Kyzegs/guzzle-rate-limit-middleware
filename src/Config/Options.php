@@ -11,10 +11,15 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Config;
 final class Options
 {
     /**
+     * $maxRetries and $retryStatusCodes configure the default
+     * StatusCodeRetryStrategy; a retry strategy passed to the middleware
+     * brings its own.
+     *
      * @param int        $maxRetries          Retries for a request that still receives a retryable status.
      * @param float      $safetyBufferSeconds Extra seconds added to every computed delay to absorb clock skew / latency.
      * @param float      $jitterPercent       Random extra delay, as a percentage (0-100) of the base delay.
-     * @param bool       $throwOnRateLimit    Throw RateLimitExceededException once retries are exhausted on a 429.
+     * @param bool       $throwOnRateLimit    Throw RateLimitExceededException once retries stop on a response the retry
+     *                                        strategy calls rate-limited (a 429 by default).
      * @param int        $maxStoreTtl         Upper bound (seconds) for how long bucket state is cached.
      * @param int[]      $retryStatusCodes    HTTP status codes that trigger a retry.
      */

@@ -14,6 +14,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\IdentityResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryStrategyInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
@@ -21,6 +22,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Handler\RateLimitHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Retry\GitHubRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
@@ -55,6 +57,7 @@ final class RateLimitMiddleware
         ?HandlerInterface $handler = null,
         ?IdentityResolverInterface $identityResolver = null,
         ?RetryAfterResolverInterface $retryAfterResolver = null,
+        ?RetryStrategyInterface $retryStrategy = null,
     ) {
         $clock ??= new SystemClock();
 
@@ -69,6 +72,7 @@ final class RateLimitMiddleware
             $sleeper ?? new UsleepSleeper(),
             $identityResolver ?? new AuthorizationIdentityResolver(),
             $retryAfterResolver ?? new DefaultRetryAfterResolver(),
+            $retryStrategy,
         );
     }
 
@@ -86,6 +90,7 @@ final class RateLimitMiddleware
         ?SleeperInterface $sleeper = null,
         ?IdentityResolverInterface $identityResolver = null,
         ?RetryAfterResolverInterface $retryAfterResolver = null,
+        ?RetryStrategyInterface $retryStrategy = null,
     ): self {
         return new self(
             options: $options,
@@ -98,6 +103,7 @@ final class RateLimitMiddleware
             sleeper: $sleeper,
             identityResolver: $identityResolver,
             retryAfterResolver: $retryAfterResolver,
+            retryStrategy: $retryStrategy,
         );
     }
 
@@ -119,9 +125,18 @@ final class RateLimitMiddleware
         );
     }
 
+    /**
+     * GitHub answers a rate limit with a 403 as well as a 429, so this retries
+     * by {@see GitHubRetryStrategy} rather than by status code alone.
+     */
     public static function github(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
     {
-        return self::create(headers: Headers::github(), store: $store, logger: $logger);
+        return self::create(
+            headers: Headers::github(),
+            store: $store,
+            logger: $logger,
+            retryStrategy: new GitHubRetryStrategy(),
+        );
     }
 
     public static function twitter(?StoreInterface $store = null, ?LoggerInterface $logger = null): self

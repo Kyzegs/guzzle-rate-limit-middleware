@@ -9,8 +9,9 @@ use Psr\Http\Message\ResponseInterface;
 use RuntimeException;
 
 /**
- * Thrown when a request keeps receiving 429 responses after the configured
- * number of retries has been exhausted (and Options::$throwOnRateLimit is true).
+ * Thrown when a request keeps receiving rate-limited responses (a 429 by
+ * default; see RetryStrategyInterface::isRateLimited()) after the retries have
+ * been exhausted (and Options::$throwOnRateLimit is true).
  */
 final class RateLimitExceededException extends RuntimeException
 {

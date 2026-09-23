@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add pluggable retry strategies: pass a `RetryStrategyInterface` as `retryStrategy:` to decide what is retried, how long to wait, and what throws `RateLimitExceededException`. The default `StatusCodeRetryStrategy` keeps the existing behaviour.
+- Add `ExponentialBackoffRetryStrategy`, which backs off with full jitter when a retried response doesn't say how long to wait.
+- Add `GitHubRetryStrategy` and use it in `RateLimitMiddleware::github()`: primary and secondary rate limits are retried whether they come as a 403 or a 429, plain 403s are not, and exhausted 403 rate limits throw.
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.

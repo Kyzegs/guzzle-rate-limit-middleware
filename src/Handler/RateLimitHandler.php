@@ -16,6 +16,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\MajorParameterAwareInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryStrategyInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
@@ -23,6 +24,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Exception\InvalidRequestLimitExceededExcept
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Retry\StatusCodeRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\BucketKeyResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
@@ -35,8 +37,10 @@ use Psr\Log\LoggerInterface;
  *
  * Before each request it reads the persisted bucket state and, if the bucket is
  * exhausted, sleeps until the window resets. After each request it persists the
- * fresh state from the response headers. A 429 that slips through is retried
- * (honouring Retry-After) up to Options::$maxRetries, then optionally throws.
+ * fresh state from the response headers. A rate limit that slips through is
+ * retried as the {@see RetryStrategyInterface} decides (by default: a 429,
+ * honouring Retry-After, up to Options::$maxRetries times), then optionally
+ * throws.
  *
  * Persisting through the injected {@see StoreInterface} is what makes rate
  * limiting work across separate requests/processes, not just within one call.
@@ -44,6 +48,15 @@ use Psr\Log\LoggerInterface;
 final class RateLimitHandler implements HandlerInterface
 {
     private readonly BucketKeyResolver $bucketKeys;
+
+    private readonly RetryStrategyInterface $retryStrategy;
+
+    /**
+     * Shown as the "of N" in retry warnings. Only known when the strategy is
+     * the default one built from Options; a custom strategy keeps its own
+     * limit.
+     */
+    private readonly ?int $retryLimit;
 
     public function __construct(
         private readonly Options $options,
@@ -56,8 +69,11 @@ final class RateLimitHandler implements HandlerInterface
         private readonly SleeperInterface $sleeper,
         private readonly IdentityResolverInterface $identityResolver = new AuthorizationIdentityResolver(),
         private readonly RetryAfterResolverInterface $retryAfterResolver = new DefaultRetryAfterResolver(),
+        ?RetryStrategyInterface $retryStrategy = null,
     ) {
         $this->bucketKeys = new BucketKeyResolver($this->store);
+        $this->retryStrategy = $retryStrategy ?? StatusCodeRetryStrategy::fromOptions($this->options);
+        $this->retryLimit = $retryStrategy === null ? $this->options->maxRetries : null;
     }
 
     /**
@@ -92,8 +108,10 @@ final class RateLimitHandler implements HandlerInterface
                 $probe?->release();
             }
 
-            if ($this->shouldRetry($response, $tries)) {
-                $this->sleepForRetry($request, $response, ++$tries);
+            $delay = $this->retryStrategy->retryDelay($request, $response, $tries + 1, $this->hintedDelay($response));
+
+            if ($delay !== null) {
+                $this->sleepForRetry($request, $response, ++$tries, $delay);
 
                 continue;
             }
@@ -220,25 +238,28 @@ final class RateLimitHandler implements HandlerInterface
             : $fresh->withRemaining($previous->remaining);
     }
 
-    private function shouldRetry(ResponseInterface $response, int $tries): bool
+    /**
+     * The resolver's reading of how long the response asks us to wait, for
+     * the retry strategy to go on. A success is never a rate limit, and some
+     * resolvers parse the body to find out, so only errors are asked.
+     */
+    private function hintedDelay(ResponseInterface $response): float
     {
-        return $tries < $this->options->maxRetries
-            && in_array($response->getStatusCode(), $this->options->retryStatusCodes, true);
+        return $response->getStatusCode() >= 400 ? $this->retryAfter($response) : 0.0;
     }
 
-    private function sleepForRetry(RequestInterface $request, ResponseInterface $response, int $tries): void
+    private function sleepForRetry(RequestInterface $request, ResponseInterface $response, int $tries, float $delay): void
     {
-        $delay = $this->withMargin($this->retryAfter($response));
+        $delay = $this->withMargin(max(0.0, $delay));
         $global = $this->isGlobal($response);
 
         $this->logger->warning(sprintf(
-            'Received %d for %s %s%s. Retry %d/%d in %.2fs.',
+            'Received %d for %s %s%s. Retry %s in %.2fs.',
             $response->getStatusCode(),
             $request->getMethod(),
             (string) $request->getUri(),
             $global ? ' (global rate limit)' : '',
-            $tries,
-            $this->options->maxRetries,
+            $this->retryLimit === null ? (string) $tries : $tries . '/' . $this->retryLimit,
             $delay,
         ));
 
@@ -247,7 +268,7 @@ final class RateLimitHandler implements HandlerInterface
 
     private function throwIfRateLimited(RequestInterface $request, ResponseInterface $response): void
     {
-        if ($response->getStatusCode() !== 429 || ! $this->options->throwOnRateLimit) {
+        if (! $this->options->throwOnRateLimit || ! $this->retryStrategy->isRateLimited($response)) {
             return;
         }
 
