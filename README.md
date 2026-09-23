@@ -9,7 +9,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 ## Features
 
 - 🔧 **Configurable headers** — works with any API (Discord, GitHub, Twitter, the IETF `RateLimit-*` draft, or your own).
-- 💾 **Cross-process state** — share rate-limit state via PSR-16 (Redis, Memcached, Laravel/Symfony cache), the filesystem, or in-memory.
+- 💾 **Cross-process state** — share rate-limit state via Redis (phpredis or Predis), PSR-16 (Memcached, Laravel/Symfony cache, …), the filesystem, or in-memory.
 - ⏳ **Pre-emptive delays** — sleeps until a bucket resets instead of failing.
 - 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws.
 - 🪣 **Bucket-hash discovery** — adapts to APIs (like Discord) that assign buckets dynamically.
@@ -100,6 +100,46 @@ $middleware = RateLimitMiddleware::github(
 | `InMemoryStore` (default) | ❌ | Lives for the PHP process only. Good for one long-running worker and tests. |
 | `FilesystemStore` | ✅ | JSON files with atomic writes. No extra dependencies. |
 | `Psr16Store` | ✅ | Wraps any `Psr\SimpleCache\CacheInterface` — Redis, Memcached, Laravel, Symfony, … |
+| `RedisStore` | ✅ | phpredis or Predis. Reserves bucket capacity in one atomic Lua script, so buckets need no lock. |
+
+### Redis
+
+`RedisStore` talks to Redis directly, through a phpredis `\Redis` connection or
+any Predis client. Unlike the other stores it doesn't need a lock to be safe
+across processes: reading a bucket's allowance and taking a slot happen in a
+single Lua script on the server, so two workers are never handed the same
+slot, and no lock is held while a request is in flight.
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Lock\RedisLockFactory;
+use Kyzegs\GuzzleRateLimitMiddleware\Store\RedisStore;
+
+$redis = new \Redis();
+$redis->connect('127.0.0.1', 6379);
+// or: $redis = new \Predis\Client('tcp://127.0.0.1:6379');
+
+$middleware = RateLimitMiddleware::discord(
+    store: new RedisStore($redis),
+    lockFactory: new RedisLockFactory($redis),
+);
+```
+
+When a bucket's allowance is unknown (its first request, or the first after a
+window resets) the script lets exactly one caller through to learn it and has
+the others poll briefly until its response lands. That caller's claim expires
+after 10 seconds (`probeTtlSeconds`), so a worker that dies mid-request can't
+stall the bucket.
+
+The global and invalid-request budgets (see the Discord preset) still go
+through the lock factory. `RedisLockFactory` covers them: `SET NX` locks with
+a random token, a TTL (30 seconds by default) for holders that die, an optional
+acquire timeout that throws `LockTimeoutException`, and a release that never
+frees a lock someone else has taken over since.
+
+Values are JSON, stored under the prefix (`grl:` by default) plus a SHA-1 of
+the key. On Redis Cluster, give the store a prefix with a hash tag, such as
+`{grl}:`, so the keys a reservation touches share a slot. Redis 6.0 or newer
+is required.
 
 ## Custom headers
 
@@ -188,12 +228,16 @@ reassigns a route. `RateLimitMiddleware::discord()` enables this together with a
 ## Concurrency / locking
 
 By default there is no locking. To coordinate concurrent callers that share a
-bucket (e.g. multiple workers), implement `LockFactoryInterface`/`LockInterface`
-and pass the factory:
+bucket (e.g. multiple workers), pass a lock factory: `RedisLockFactory`, or your
+own `LockFactoryInterface`/`LockInterface` implementation:
 
 ```php
 $middleware = RateLimitMiddleware::create(lockFactory: new MyLockFactory());
 ```
+
+With `RedisStore` buckets need no lock at all, since the store reserves
+capacity atomically; the lock factory is then only used for the global and
+invalid-request budgets.
 
 The lock covers the bookkeeping, not the request. A caller takes a slot out of
 the bucket's remaining allowance and releases the lock before sending, so a

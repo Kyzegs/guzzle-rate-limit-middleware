@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add `RedisStore` (phpredis or Predis), which reserves bucket capacity in a single atomic Lua script, so buckets need no lock across processes and none is held while a request is in flight.
+- Add `AtomicReservationStoreInterface`, which the handler uses in place of the bucket lock when a store implements it.
+- Add `RedisLockFactory`: token-checked Redis locks with a TTL and an optional acquire timeout that throws `LockTimeoutException`.
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.

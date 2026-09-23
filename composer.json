@@ -18,9 +18,12 @@
     },
     "require-dev": {
         "phpunit/phpunit": "^10.0",
-        "phpstan/phpstan": "^1.0"
+        "phpstan/phpstan": "^1.0",
+        "predis/predis": "^2.2"
     },
     "suggest": {
+        "ext-redis": "Redis via phpredis, for RedisStore (lock-free atomic reservations) and RedisLockFactory",
+        "predis/predis": "Redis via Predis, for RedisStore (lock-free atomic reservations) and RedisLockFactory",
         "psr/simple-cache": "A PSR-16 cache (e.g. Redis, Memcached, Laravel or Symfony cache) for cross-process state via Psr16Store"
     },
     "autoload": {

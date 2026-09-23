@@ -8,6 +8,7 @@ use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Promise\PromiseInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\AtomicReservationStoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\HandlerInterface;
@@ -116,9 +117,15 @@ final class RateLimitHandler implements HandlerInterface
      * Returns the still-held lock when the allowance is unknown — nothing can
      * be reserved until a response reveals it, so that one request goes alone
      * and the caller releases the lock once it has landed.
+     *
+     * A store that can reserve atomically does all of this without the lock.
      */
     private function reserveBucketCapacity(string $effectiveKey): ?LockInterface
     {
+        if ($this->store instanceof AtomicReservationStoreInterface) {
+            return $this->reserveAtomically($this->store, $effectiveKey);
+        }
+
         $slept = false;
 
         while (true) {
@@ -164,6 +171,48 @@ final class RateLimitHandler implements HandlerInterface
 
             $this->sleeper->sleep($delay);
             $slept = true;
+        }
+    }
+
+    /**
+     * The same rules as the locked path, applied by a store that reads the
+     * allowance and takes the slot in one indivisible step, so no bucket lock
+     * is needed.
+     *
+     * A probe comes back as a handle that the caller releases once the
+     * response has landed, exactly like the held lock. Waiting on another
+     * caller's probe is a short poll rather than a window, so it gets no
+     * safety margin; after a window wait the store sees the reset has passed
+     * and hands out the probe, or a slot if someone else probed first.
+     */
+    private function reserveAtomically(AtomicReservationStoreInterface $store, string $effectiveKey): ?LockInterface
+    {
+        while (true) {
+            $reservation = $store->reserve($effectiveKey, $this->clock->now());
+
+            if ($reservation->isReserved()) {
+                return null;
+            }
+
+            if ($reservation->probe !== null) {
+                return $reservation->probe;
+            }
+
+            if ($reservation->probeInFlight) {
+                $this->sleeper->sleep($reservation->delaySeconds);
+
+                continue;
+            }
+
+            $delay = $this->withMargin($reservation->delaySeconds);
+
+            $this->logger->debug(sprintf(
+                'Rate limit bucket "%s" exhausted; sleeping %.2fs until reset.',
+                $effectiveKey,
+                $delay,
+            ));
+
+            $this->sleeper->sleep($delay);
         }
     }
 
