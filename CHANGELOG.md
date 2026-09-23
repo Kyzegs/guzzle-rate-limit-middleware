@@ -43,6 +43,10 @@
 - Add optional PSR-14 events (`RequestDelayed`, `RetryScheduled`, `RateLimitExceeded`, `RateLimitUpdated`, `InvalidRequestLimitReached`) through a new `events` argument on the middleware, its presets and `RateLimitHandler`.
 - Add structured PSR-3 context to log records, and a debug record when the global budget delays a request.
 - Require `psr/event-dispatcher` (interfaces only).
+- Add `RateLimitMiddleware::state()` and `forget()` to read or drop the stored state of the bucket a request would use.
+- Add `RateLimitMiddleware::globalBudget()` and `invalidRequestBudget()`, returning a `BudgetState` for the configured self-imposed budgets.
+- Add `InspectableHandlerInterface`, which custom handlers can implement to support inspection.
+- Add `RateLimit::resetsAt()`.
 
 ## 1.2.0
 

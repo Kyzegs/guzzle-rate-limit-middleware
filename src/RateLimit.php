@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kyzegs\GuzzleRateLimitMiddleware;
 
+use DateTimeImmutable;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
@@ -101,6 +102,19 @@ final class RateLimit
     public function secondsUntilReset(ClockInterface $clock): float
     {
         return max(0.0, $this->reset - $clock->now());
+    }
+
+    /**
+     * The reset instant (UTC) for display and scheduling, or null when the
+     * response carried no usable reset header.
+     */
+    public function resetsAt(): ?DateTimeImmutable
+    {
+        if ($this->reset <= 0.0) {
+            return null;
+        }
+
+        return DateTimeImmutable::createFromFormat('U.u', sprintf('%.6F', $this->reset)) ?: null;
     }
 
     /**
