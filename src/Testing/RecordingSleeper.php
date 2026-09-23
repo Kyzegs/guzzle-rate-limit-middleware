@@ -2,13 +2,14 @@
 
 declare(strict_types=1);
 
-namespace Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles;
+namespace Kyzegs\GuzzleRateLimitMiddleware\Testing;
 
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 
 /**
  * Records every requested sleep and advances an associated clock instead of
- * actually blocking, so timing behaviour can be asserted without real waits.
+ * actually blocking, so timing behaviour can be asserted without real waits
+ * in your own tests.
  */
 final class RecordingSleeper implements SleeperInterface
 {
