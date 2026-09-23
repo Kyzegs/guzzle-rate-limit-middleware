@@ -210,6 +210,20 @@ not ordinary throughput.
 The clock and sleeper are injectable, so you can assert delays without real
 waits. See `tests/` — `FakeClock` and `RecordingSleeper` are good starting points.
 
+The `clock:` argument also accepts any PSR-20 clock (e.g. `symfony/clock`), so
+the middleware can share your application's clock. Wrap one in `Psr20Clock`
+where a `ClockInterface` is expected, such as the stores:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\Psr20Clock;
+
+$middleware = RateLimitMiddleware::create(
+    store: new InMemoryStore(new Psr20Clock($psrClock)),
+    clock: $psrClock,
+);
+```
+
 ## Development
 
 ```bash

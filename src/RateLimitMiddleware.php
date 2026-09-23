@@ -23,10 +23,12 @@ use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLockFactory;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\Psr20Clock;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\UsleepSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
+use Psr\Clock\ClockInterface as PsrClockInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -50,13 +52,17 @@ final class RateLimitMiddleware
         ?LoggerInterface $logger = null,
         ?BucketResolverInterface $resolver = null,
         ?LockFactoryInterface $lockFactory = null,
-        ?ClockInterface $clock = null,
+        ClockInterface|PsrClockInterface|null $clock = null,
         ?SleeperInterface $sleeper = null,
         ?HandlerInterface $handler = null,
         ?IdentityResolverInterface $identityResolver = null,
         ?RetryAfterResolverInterface $retryAfterResolver = null,
     ) {
-        $clock ??= new SystemClock();
+        $clock = match (true) {
+            $clock instanceof ClockInterface => $clock,
+            $clock instanceof PsrClockInterface => new Psr20Clock($clock),
+            default => new SystemClock(),
+        };
 
         $this->handler = $handler ?? new RateLimitHandler(
             $options,
@@ -74,6 +80,8 @@ final class RateLimitMiddleware
 
     /**
      * Build a middleware with explicit, named dependencies.
+     *
+     * The clock may be this package's ClockInterface or any PSR-20 clock.
      */
     public static function create(
         Options $options = new Options(),
@@ -82,7 +90,7 @@ final class RateLimitMiddleware
         ?LoggerInterface $logger = null,
         ?BucketResolverInterface $resolver = null,
         ?LockFactoryInterface $lockFactory = null,
-        ?ClockInterface $clock = null,
+        ClockInterface|PsrClockInterface|null $clock = null,
         ?SleeperInterface $sleeper = null,
         ?IdentityResolverInterface $identityResolver = null,
         ?RetryAfterResolverInterface $retryAfterResolver = null,

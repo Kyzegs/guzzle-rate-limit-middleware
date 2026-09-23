@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Accept a PSR-20 clock as the middleware `clock:`, and add `Psr20Clock` to adapt one wherever a `ClockInterface` is expected.
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.
