@@ -393,6 +393,49 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertSame(0, $heldDuringRequest, 'A known bucket must allow concurrent requests.');
     }
 
+    public function test_route_without_rate_limit_headers_is_not_probed_one_request_at_a_time(): void
+    {
+        $request = new Request('GET', 'https://api.test/health');
+        $lockFactory = new SpyLockFactory();
+        $handler = $this->handler($this->store(), new Options(), new Headers(), new DefaultBucketResolver(), $lockFactory);
+
+        $handler->handle($this->responder(new Response(200)), $request, []);
+
+        $this->assertSame(0, $this->heldDuringRequest($handler, $lockFactory, $request, new Response(200)));
+    }
+
+    public function test_unmetered_route_is_probed_again_later(): void
+    {
+        $request = new Request('GET', 'https://api.test/health');
+        $lockFactory = new SpyLockFactory();
+        $handler = $this->handler($this->store(), new Options(), new Headers(), new DefaultBucketResolver(), $lockFactory);
+
+        $handler->handle($this->responder(new Response(200)), $request, []);
+        $this->clock->advance(61);
+
+        $this->assertSame(1, $this->heldDuringRequest($handler, $lockFactory, $request, new Response(200)));
+    }
+
+    public function test_response_without_rate_limit_headers_keeps_the_known_window(): void
+    {
+        $store = $this->store();
+        $request = new Request('GET', 'https://api.test/users');
+
+        $this->handler($store)->handle(
+            $this->responder(new Response(200, ['X-RateLimit-Remaining' => '1', 'X-RateLimit-Reset' => '10'])),
+            $request,
+            [],
+        );
+        // Spends the last slot, but an error page from a proxy comes back.
+        $this->handler($store)->handle($this->responder(new Response(503)), $request, []);
+        $this->assertSame(0, $this->sleeper->count());
+
+        $this->handler($store)->handle($this->responder(new Response(200, ['X-RateLimit-Remaining' => '5'])), $request, []);
+
+        $this->assertSame(1, $this->sleeper->count(), 'The spent slot must not be handed back.');
+        $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
     public function test_reserved_slots_count_down_within_the_window(): void
     {
         $store = $this->store();
@@ -440,6 +483,31 @@ final class RateLimitHandlerTest extends TestCase
             $this->clock,
             $this->sleeper,
         );
+    }
+
+    /**
+     * How many locks were held while the request itself was in flight.
+     */
+    private function heldDuringRequest(
+        RateLimitHandler $handler,
+        SpyLockFactory $lockFactory,
+        RequestInterface $request,
+        ResponseInterface $response,
+    ): int {
+        $held = null;
+        $handler->handle(
+            static function () use ($lockFactory, $response, &$held): ResponseInterface {
+                $held = $lockFactory->acquired - $lockFactory->released;
+
+                return $response;
+            },
+            $request,
+            [],
+        );
+
+        TestCase::assertIsInt($held);
+
+        return $held;
     }
 
     private function responder(ResponseInterface $response): callable

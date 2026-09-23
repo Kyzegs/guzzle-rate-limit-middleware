@@ -44,6 +44,12 @@ use Psr\Log\LoggerInterface;
  */
 final class RateLimitHandler implements HandlerInterface
 {
+    /**
+     * How long a route that answered without rate-limit headers is treated as
+     * unmetered before a request probes it again.
+     */
+    private const UNMETERED_TTL = 60;
+
     private readonly BucketKeyResolver $bucketKeys;
 
     public function __construct(
@@ -130,6 +136,12 @@ final class RateLimitHandler implements HandlerInterface
 
             try {
                 $stored = $this->store->get($effectiveKey);
+
+                // The API doesn't meter this route: nothing to reserve.
+                if (($stored['unmetered'] ?? false) === true) {
+                    return null;
+                }
+
                 $rateLimit = $stored === null ? null : RateLimit::fromArray($stored);
 
                 // Unknown allowance, or one that has already been waited out:
@@ -179,6 +191,12 @@ final class RateLimitHandler implements HandlerInterface
         string $major,
         string $effectiveKey,
     ): string {
+        if (! $this->headers->presentIn($response)) {
+            $this->recordUnmetered($response, $effectiveKey);
+
+            return $effectiveKey;
+        }
+
         $rateLimit = RateLimit::fromResponse($response, $this->headers, $this->clock);
 
         if ($this->headers->needsToCheckBucketHeader() && $rateLimit->bucketHash !== null) {
@@ -190,6 +208,30 @@ final class RateLimitHandler implements HandlerInterface
         $this->store->put($effectiveKey, $rateLimit->toArray(), $this->ttlFor($rateLimit));
 
         return $effectiveKey;
+    }
+
+    /**
+     * A response without rate-limit headers says nothing about the bucket, so
+     * it must not overwrite a known window: an error page from a proxy would
+     * otherwise hand back capacity that is already spent.
+     *
+     * A successful one on a route with no live window means the API doesn't
+     * meter it. Remember that for a while; left unknown, every request on the
+     * route would go alone as a probe and hold the lock across its round trip.
+     */
+    private function recordUnmetered(ResponseInterface $response, string $effectiveKey): void
+    {
+        $status = $response->getStatusCode();
+        if ($status < 200 || $status >= 400) {
+            return;
+        }
+
+        $stored = $this->store->get($effectiveKey);
+        if ($stored !== null && RateLimit::fromArray($stored)->secondsUntilReset($this->clock) > 0.0) {
+            return;
+        }
+
+        $this->store->put($effectiveKey, ['unmetered' => true], self::UNMETERED_TTL);
     }
 
     /**

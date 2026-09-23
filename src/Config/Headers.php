@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Kyzegs\GuzzleRateLimitMiddleware\Config;
 
+use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
+use Psr\Http\Message\ResponseInterface;
+
 final class Headers
 {
     public function __construct(
@@ -68,5 +71,19 @@ final class Headers
     public function needsToCheckBucketHeader(): bool
     {
         return $this->bucket !== null;
+    }
+
+    /**
+     * Whether the response carries any header that describes the bucket.
+     */
+    public function presentIn(ResponseInterface $response): bool
+    {
+        foreach ([$this->limit, $this->remaining, $this->reset, $this->resetAfter, $this->retryAfter] as $name) {
+            if (HeaderParser::has($response, $name)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

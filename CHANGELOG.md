@@ -5,6 +5,8 @@
 - Only look for a global-limit flag in the body of a 429, so ordinary JSON with a `global` field no longer starts a global cooldown.
 - Never read a non-seekable response body, so streamed responses reach the caller intact.
 - Accept `Retry-After` as an HTTP-date as well as delay-seconds; a date was previously read as "retry immediately".
+- Treat a route whose successful responses carry no rate-limit headers as unmetered for a minute, instead of probing it one request at a time under the lock.
+- Keep a bucket's known window when a response without rate-limit headers (e.g. a proxy error page) comes back, so spent capacity isn't handed back.
 
 ## 1.2.0
 
