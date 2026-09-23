@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add optional PSR-14 events (`RequestDelayed`, `RetryScheduled`, `RateLimitExceeded`, `RateLimitUpdated`, `InvalidRequestLimitReached`) through a new `events` argument on the middleware, its presets and `RateLimitHandler`.
+- Add structured PSR-3 context to log records, and a debug record when the global budget delays a request.
+- Require `psr/event-dispatcher` (interfaces only).
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.

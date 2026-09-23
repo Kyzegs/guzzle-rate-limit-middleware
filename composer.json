@@ -13,6 +13,7 @@
     "require": {
         "php": "^8.2",
         "guzzlehttp/guzzle": "^7.10",
+        "psr/event-dispatcher": "^1.0",
         "psr/log": "^3.0",
         "psr/simple-cache": "^3.0"
     },

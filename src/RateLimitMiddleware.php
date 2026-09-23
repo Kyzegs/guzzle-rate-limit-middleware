@@ -27,6 +27,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\UsleepSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
+use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -37,7 +38,8 @@ use Psr\Log\NullLogger;
  *
  * Use the named-argument {@see create()} factory for full control, or the
  * per-API presets ({@see discord()}, {@see github()}, {@see twitter()},
- * {@see ietf()}).
+ * {@see ietf()}). Every one of them takes an optional PSR-14 `events`
+ * dispatcher for observing delays, retries and limits.
  */
 final class RateLimitMiddleware
 {
@@ -55,6 +57,7 @@ final class RateLimitMiddleware
         ?HandlerInterface $handler = null,
         ?IdentityResolverInterface $identityResolver = null,
         ?RetryAfterResolverInterface $retryAfterResolver = null,
+        ?EventDispatcherInterface $events = null,
     ) {
         $clock ??= new SystemClock();
 
@@ -69,6 +72,7 @@ final class RateLimitMiddleware
             $sleeper ?? new UsleepSleeper(),
             $identityResolver ?? new AuthorizationIdentityResolver(),
             $retryAfterResolver ?? new DefaultRetryAfterResolver(),
+            $events,
         );
     }
 
@@ -86,6 +90,7 @@ final class RateLimitMiddleware
         ?SleeperInterface $sleeper = null,
         ?IdentityResolverInterface $identityResolver = null,
         ?RetryAfterResolverInterface $retryAfterResolver = null,
+        ?EventDispatcherInterface $events = null,
     ): self {
         return new self(
             options: $options,
@@ -98,6 +103,7 @@ final class RateLimitMiddleware
             sleeper: $sleeper,
             identityResolver: $identityResolver,
             retryAfterResolver: $retryAfterResolver,
+            events: $events,
         );
     }
 
@@ -106,6 +112,7 @@ final class RateLimitMiddleware
         ?LoggerInterface $logger = null,
         ?LockFactoryInterface $lockFactory = null,
         Options $options = new Options(globalLimit: new GlobalLimit(), invalidRequestLimit: new InvalidRequestLimit()),
+        ?EventDispatcherInterface $events = null,
     ): self {
         return self::create(
             options: $options,
@@ -116,22 +123,32 @@ final class RateLimitMiddleware
             lockFactory: $lockFactory,
             identityResolver: new AuthorizationIdentityResolver(),
             retryAfterResolver: new DiscordRetryAfterResolver(),
+            events: $events,
         );
     }
 
-    public static function github(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
-        return self::create(headers: Headers::github(), store: $store, logger: $logger);
+    public static function github(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
+        return self::create(headers: Headers::github(), store: $store, logger: $logger, events: $events);
     }
 
-    public static function twitter(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
-        return self::create(headers: Headers::twitter(), store: $store, logger: $logger);
+    public static function twitter(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
+        return self::create(headers: Headers::twitter(), store: $store, logger: $logger, events: $events);
     }
 
-    public static function ietf(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
-        return self::create(headers: Headers::ietf(), store: $store, logger: $logger);
+    public static function ietf(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
+        return self::create(headers: Headers::ietf(), store: $store, logger: $logger, events: $events);
     }
 
     /**

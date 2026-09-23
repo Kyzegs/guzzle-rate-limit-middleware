@@ -14,6 +14,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 - 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws.
 - 🪣 **Bucket-hash discovery** — adapts to APIs (like Discord) that assign buckets dynamically.
 - 🔒 **Optional locking** — plug in a distributed lock to serialise concurrent callers.
+- 📡 **Observable** — PSR-14 events and structured PSR-3 log context for every delay, retry and limit.
 - 🧪 **Fully testable** — the clock and sleeper are injectable, so timing is deterministic in tests.
 
 ## Installation
@@ -204,6 +205,41 @@ nothing else can reveal the new limit.
 
 This means a lock wait timeout signals genuine contention on an unknown bucket,
 not ordinary throughput.
+
+## Events
+
+Pass any [PSR-14](https://www.php-fig.org/psr/psr-14/) event dispatcher to
+count retries, export delay metrics or alert on limits. `create()` and every
+preset take it as `events:`:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Event\RetryScheduled;
+use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
+use Symfony\Component\EventDispatcher\EventDispatcher;
+
+$dispatcher = new EventDispatcher();
+$dispatcher->addListener(RetryScheduled::class, function (RetryScheduled $event) use ($metrics): void {
+    $metrics->increment('rate_limit.retries', ['global' => $event->global]);
+});
+
+$middleware = RateLimitMiddleware::github(events: $dispatcher);
+```
+
+| Event | Dispatched | Carries |
+|-------|------------|---------|
+| `RequestDelayed` | before sleeping for a spent bucket or global budget | `request`, `delay`, `reason` (`DelayReason::Bucket`/`GlobalLimit`), `key` |
+| `RetryScheduled` | before sleeping to retry a `429` (or other `retryStatusCodes`) | `request`, `response`, `attempt`, `maxRetries`, `delay`, `global` |
+| `RateLimitExceeded` | right before `RateLimitExceededException` is thrown | `request`, `response`, `retryAfter`, `global` |
+| `RateLimitUpdated` | after a response's bucket state is stored | `request`, `rateLimit`, `key` |
+| `InvalidRequestLimitReached` | right before `InvalidRequestLimitExceededException` is thrown | `request`, `retryAfter` |
+
+Events are read-only notifications: a listener cannot change a delay. `delay`
+is exactly what is slept, and `key` is the opaque, hashed storage key, so it
+never exposes a route or a token.
+
+The PSR-3 logger gets the same data as structured context (`key`, `delay`,
+`reason`, `method`, `status`, `attempt`, …), so log pipelines can aggregate
+without parsing messages.
 
 ## Testing your integration
 
