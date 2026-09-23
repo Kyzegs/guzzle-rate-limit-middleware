@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Run the test suite on PHP 8.2-8.4 (plus lowest dependencies) and PHPStan in GitHub Actions.
+- Require PHPUnit 10.1 or later for development; `phpunit.xml.dist` uses the `<source>` element, which 10.0 rejects.
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.
