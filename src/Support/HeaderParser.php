@@ -32,6 +32,8 @@ final class HeaderParser
      * RFC 9110 allows either delay-seconds or an HTTP-date; casting a date to
      * a number silently turned it into "retry immediately". Returns null when
      * the header is absent or unparseable.
+     *
+     * @internal
      */
     public static function delay(ResponseInterface $response, ?string $name, float $now): ?float
     {

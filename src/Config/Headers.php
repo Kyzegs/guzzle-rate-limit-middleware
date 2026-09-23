@@ -82,6 +82,8 @@ final class Headers
 
     /**
      * Whether the response carries any header that describes the bucket.
+     *
+     * @internal
      */
     public function presentIn(ResponseInterface $response): bool
     {

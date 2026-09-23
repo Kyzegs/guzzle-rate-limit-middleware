@@ -6,6 +6,9 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Support;
 
 use Psr\Http\Message\ResponseInterface;
 
+/**
+ * @internal
+ */
 final class JsonBody
 {
     /**
