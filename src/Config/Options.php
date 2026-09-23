@@ -44,6 +44,19 @@ final class Options
     }
 
     /**
+     * A copy with $globalLimit replacing the current one; every other option is
+     * unchanged.
+     *
+     * Every constructor parameter is a promoted property of the same name, so
+     * the copy is built from the object's own properties and an option added
+     * later is carried over instead of silently reset to its default.
+     */
+    public function withGlobalLimit(?GlobalLimit $globalLimit): self
+    {
+        return new self(...[...get_object_vars($this), 'globalLimit' => $globalLimit]);
+    }
+
+    /**
      * Balanced defaults suitable for most APIs.
      */
     public static function default(): self

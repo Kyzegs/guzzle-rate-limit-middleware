@@ -71,7 +71,10 @@ $middleware = RateLimitMiddleware::discord(options: new Options(
 
 Raw authorization and webhook tokens never appear in persisted bucket or lock
 keys. Interaction callback endpoints are excluded from Discord's bot-global
-budget. Shared-scope 429 responses do not consume the invalid-request budget.
+budget; the preset adds that exemption to any `GlobalLimit` you pass, so the
+example above keeps it (`GlobalLimit::discord()` spells it out). Shared-scope
+429 responses do not consume the invalid-request budget
+(`InvalidRequestLimit::$ignoredScopes`, default `['shared']`).
 
 ## Cross-process rate limiting
 
@@ -155,6 +158,27 @@ When retries are exhausted on a `429` and `throwOnRateLimit` is `true`, a
 `Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException` is thrown
 (carrying the request, response, retry-after seconds and global flag); for an
 async request, the promise rejects with it.
+
+### Global request budget
+
+`globalLimit` caps every request made with one credential, across all routes,
+on top of the per-bucket limits. Routes the API leaves out of that budget are
+exempted with regular expressions matched against the request path:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
+
+$options = new Options(
+    globalLimit: new GlobalLimit(
+        maxRequests:   100,
+        windowSeconds: 60,
+        exemptPaths:   ['#^/health$#'],
+    ),
+);
+```
+
+Nothing is exempt by default, and a pattern that doesn't compile throws an
+`InvalidArgumentException` when the limit is built.
 
 ## Bucket resolution
 

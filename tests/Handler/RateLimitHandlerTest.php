@@ -10,10 +10,12 @@ use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\Psr7\Utils;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\InvalidRequestLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Exception\InvalidRequestLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Handler\RateLimitHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
@@ -254,6 +256,60 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertSame(0, $this->sleeper->count());
     }
 
+    public function test_global_budget_counts_interaction_callback_paths_outside_discord(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            safetyBufferSeconds: 0,
+            globalLimit: new GlobalLimit(maxRequests: 1, windowSeconds: 1),
+        ));
+        $respond = $this->responder(new Response(204));
+        $callback = new Request('POST', 'https://api.test/interactions/1/tok/callback', ['Authorization' => 'Bearer secret']);
+
+        $handler->handle($respond, $callback, [])->wait();
+        $handler->handle($respond, $callback, [])->wait();
+
+        $this->assertSame(1, $this->sleeper->count(), 'Only a configured pattern may exempt a path.');
+    }
+
+    public function test_global_budget_skips_configured_exempt_paths(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            safetyBufferSeconds: 0,
+            globalLimit: new GlobalLimit(maxRequests: 1, windowSeconds: 1, exemptPaths: ['#^/health$#']),
+        ));
+        $respond = $this->responder(new Response(204));
+
+        for ($i = 0; $i < 3; $i++) {
+            $handler->handle($respond, new Request('GET', 'https://api.test/health'), [])->wait();
+        }
+        $this->assertSame(0, $this->sleeper->count());
+
+        $handler->handle($respond, new Request('GET', 'https://api.test/users'), [])->wait();
+        $handler->handle($respond, new Request('GET', 'https://api.test/users'), [])->wait();
+
+        $this->assertSame(1, $this->sleeper->count(), 'Exempt requests must not have spent the budget.');
+        $this->assertEqualsWithDelta(1.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_discord_global_limit_exempts_interaction_callbacks(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            safetyBufferSeconds: 0,
+            globalLimit: new GlobalLimit(maxRequests: 1, windowSeconds: 1, exemptPaths: GlobalLimit::discord()->exemptPaths),
+        ), Headers::discord(), new DiscordBucketResolver($this->clock));
+        $respond = $this->responder(new Response(204));
+
+        for ($i = 0; $i < 3; $i++) {
+            $handler->handle(
+                $respond,
+                new Request('POST', 'https://discord.com/api/v10/interactions/1/tok/callback', ['Authorization' => 'Bot secret']),
+                [],
+            )->wait();
+        }
+
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
     public function test_streamed_body_is_left_for_the_caller(): void
     {
         $handler = $this->handler($this->store(), new Options(globalLimit: new GlobalLimit()));
@@ -288,6 +344,40 @@ final class RateLimitHandlerTest extends TestCase
         )->wait();
 
         $this->assertSame('{"retry_after":2,"global":true}', (string) $response->getBody());
+    }
+
+    public function test_shared_scope_429s_do_not_count_against_the_invalid_request_budget_by_default(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            maxRetries: 0,
+            throwOnRateLimit: false,
+            invalidRequestLimit: new InvalidRequestLimit(maxRequests: 1),
+        ), Headers::discord(), new DiscordBucketResolver($this->clock));
+
+        // Budget of one: the shared 429 must not spend it, so only the user 429 does.
+        $this->rateLimitedInScope($handler, 'shared');
+        $this->rateLimitedInScope($handler, 'user');
+
+        $this->expectException(InvalidRequestLimitExceededException::class);
+
+        $handler->handle($this->responder(new Response(204)), new Request('GET', 'https://discord.com/api/v10/users/@me'), [])->wait();
+    }
+
+    public function test_ignored_scopes_are_configurable(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            maxRetries: 0,
+            throwOnRateLimit: false,
+            invalidRequestLimit: new InvalidRequestLimit(maxRequests: 1, ignoredScopes: ['User']),
+        ), Headers::discord(), new DiscordBucketResolver($this->clock));
+
+        // Configured scopes match case-insensitively; "shared" now counts.
+        $this->rateLimitedInScope($handler, 'user');
+        $this->rateLimitedInScope($handler, 'shared');
+
+        $this->expectException(InvalidRequestLimitExceededException::class);
+
+        $handler->handle($this->responder(new Response(204)), new Request('GET', 'https://discord.com/api/v10/users/@me'), [])->wait();
     }
 
     public function test_throws_after_retries_exhausted(): void
@@ -644,6 +734,15 @@ final class RateLimitHandlerTest extends TestCase
         TestCase::assertIsInt($held);
 
         return $held;
+    }
+
+    private function rateLimitedInScope(RateLimitHandler $handler, string $scope): void
+    {
+        $handler->handle(
+            $this->responder(new Response(429, ['X-RateLimit-Scope' => $scope])),
+            new Request('GET', 'https://discord.com/api/v10/channels/1'),
+            [],
+        )->wait();
     }
 
     private function responder(ResponseInterface $response): callable

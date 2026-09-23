@@ -26,6 +26,11 @@
 - Stop waiting on the inner handler's promise. Bookkeeping and `429` retries are chained onto it, so `getAsync()`, `Pool` and `Promise\Utils::all()` keep their transfers concurrent. Waiting for an exhausted bucket, a spent global budget or a retry delay still blocks.
 - `RateLimitHandler::handle()` always returns a promise. Failures before sending (such as `InvalidRequestLimitExceededException`) reject it instead of being thrown.
 - Queue concurrent requests from one process to a bucket with an unknown allowance behind the first response, instead of blocking on the lock that request holds. The lock is also released when that request is cancelled.
+- Add `GlobalLimit::$exemptPaths`, path patterns that bypass the global budget, with `GlobalLimit::discord()` and `GlobalLimit::withExemptPaths()`.
+- Stop exempting `/interactions/{id}/{token}/callback` from every global limit. This is a behaviour change for non-Discord configurations, which now count those paths unless they list them in `exemptPaths`; `RateLimitMiddleware::discord()` still exempts interaction callbacks, including for a custom `GlobalLimit`.
+- Add `InvalidRequestLimit::$ignoredScopes`, the scope values whose 429s don't count against the invalid-request budget (default `['shared']`, as before).
+- Date messages for Discord's old-message deletion bucket with the injected clock: `DiscordBucketResolver` accepts a clock, and `RateLimitMiddleware::discord()` takes a `clock` it shares with the resolver.
+- Add `Options::withGlobalLimit()`.
 
 ## 1.2.0
 

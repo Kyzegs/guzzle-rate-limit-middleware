@@ -6,6 +6,7 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Tests\Resolver;
 
 use GuzzleHttp\Psr7\Request;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use PHPUnit\Framework\TestCase;
 
 final class DiscordBucketResolverTest extends TestCase
@@ -48,5 +49,28 @@ final class DiscordBucketResolverTest extends TestCase
         $major = $resolver->majorParameters(new Request('GET', 'https://discord.com/api/v10/users/@me'));
 
         $this->assertSame('', $major);
+    }
+
+    public function test_deleting_a_message_switches_bucket_once_it_is_older_than_fourteen_days(): void
+    {
+        // Snowflake for a message created at exactly 1_700_000_000 (UNIX seconds).
+        $createdAt = 1_700_000_000.0;
+        $messageId = ((int) ($createdAt * 1000) - 1_420_070_400_000) << 22;
+        $request = new Request('DELETE', "https://discord.com/api/v10/channels/123/messages/{$messageId}");
+        $clock = new FakeClock($createdAt + 14 * 86_400);
+        $resolver = new DiscordBucketResolver($clock);
+
+        $this->assertSame(
+            'DELETE /api/v10/channels/{channel_id}/messages/{id}',
+            $resolver->resolve($request),
+            'A message exactly 14 days old still uses the regular bucket.',
+        );
+
+        $clock->advance(0.001);
+
+        $this->assertSame(
+            'DELETE /api/v10/channels/{channel_id}/messages/{id}:delete-old-message',
+            $resolver->resolve($request),
+        );
     }
 }

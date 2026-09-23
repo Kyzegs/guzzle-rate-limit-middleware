@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Kyzegs\GuzzleRateLimitMiddleware\Resolver;
 
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\MajorParameterAwareInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
 use Psr\Http\Message\RequestInterface;
 
 /**
@@ -35,6 +37,15 @@ final class DiscordBucketResolver implements BucketResolverInterface, MajorParam
         'webhooks' => ['webhook_id', 'webhook_token'],
     ];
 
+    /**
+     * Deleting a message older than 14 days is its own bucket. The clock that
+     * decides the age is injected so it agrees with the one the handler times
+     * buckets by, and so the boundary can be tested.
+     */
+    public function __construct(private readonly ClockInterface $clock = new SystemClock())
+    {
+    }
+
     public function resolve(RequestInterface $request): string
     {
         $segments = $this->segments($request->getUri()->getPath());
@@ -55,7 +66,7 @@ final class DiscordBucketResolver implements BucketResolverInterface, MajorParam
 
         if ($request->getMethod() === 'DELETE' && preg_match('#/channels/\d+/messages/(\d+)$#', $request->getUri()->getPath(), $matches) === 1) {
             $timestamp = (((int) $matches[1]) >> 22) + 1420070400000;
-            if ((int) floor(microtime(true) * 1000) - $timestamp > 1_209_600_000) {
+            if ($this->clock->now() * 1000 - $timestamp > 1_209_600_000) {
                 $key .= ':delete-old-message';
             }
         }
