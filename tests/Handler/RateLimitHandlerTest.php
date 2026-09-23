@@ -118,6 +118,23 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertEqualsWithDelta(5.0, $this->sleeper->sleeps[0], 0.001); // 4 + 1 buffer
     }
 
+    public function test_retry_after_http_date_is_honoured(): void
+    {
+        $handler = $this->handler($this->store());
+
+        $response = $handler->handle(
+            $this->queue(
+                new Response(429, ['Retry-After' => gmdate('D, d M Y H:i:s \\G\\M\\T', 1_030)]),
+                new Response(200, ['X-RateLimit-Remaining' => '9']),
+            ),
+            new Request('GET', 'https://api.test/users'),
+            [],
+        );
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertEqualsWithDelta(31.0, $this->sleeper->sleeps[0], 0.001); // 30 + 1 buffer
+    }
+
     public function test_discord_retry_after_falls_back_to_json_without_consuming_body(): void
     {
         $handler = new RateLimitHandler(

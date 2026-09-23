@@ -120,9 +120,9 @@ final class RateLimit
             return self::normaliseTimestamp((float) $reset, $now);
         }
 
-        $retryAfter = HeaderParser::value($response, $headers->retryAfter);
+        $retryAfter = HeaderParser::delay($response, $headers->retryAfter, $now);
         if ($retryAfter !== null) {
-            return $now + (float) $retryAfter;
+            return $now + $retryAfter;
         }
 
         return 0.0;

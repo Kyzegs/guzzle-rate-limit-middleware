@@ -66,6 +66,16 @@ final class RateLimitTest extends TestCase
         $this->assertSame(7.0, $rateLimit->secondsUntilReset($clock));
     }
 
+    public function test_retry_after_http_date_is_used_when_no_reset_header(): void
+    {
+        $clock = new FakeClock(1_000.0);
+        $response = new Response(429, ['Retry-After' => gmdate('D, d M Y H:i:s \\G\\M\\T', 1_030)]);
+
+        $rateLimit = RateLimit::fromResponse($response, new Headers(), $clock);
+
+        $this->assertSame(30.0, $rateLimit->secondsUntilReset($clock));
+    }
+
     public function test_should_delay_when_exhausted_and_not_yet_reset(): void
     {
         $clock = new FakeClock(1_000.0);

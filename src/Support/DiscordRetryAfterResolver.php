@@ -12,9 +12,9 @@ final class DiscordRetryAfterResolver extends DefaultRetryAfterResolver
 {
     public function resolve(ResponseInterface $response, Headers $headers, ClockInterface $clock): float
     {
-        $header = HeaderParser::value($response, $headers->retryAfter);
+        $header = HeaderParser::delay($response, $headers->retryAfter, $clock->now());
         if ($header !== null) {
-            return max(0.0, (float) $header);
+            return $header;
         }
 
         $retryAfter = JsonBody::decode($response)['retry_after'] ?? null;

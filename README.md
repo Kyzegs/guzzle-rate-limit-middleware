@@ -114,7 +114,7 @@ $headers = new Headers(
     remaining:  'X-API-Remaining',
     reset:      'X-API-Reset',        // absolute timestamp OR relative seconds
     resetAfter: null,                 // relative seconds (preferred when present)
-    retryAfter: 'Retry-After',        // used for 429 retry delays
+    retryAfter: 'Retry-After',        // used for 429 retry delays (seconds or HTTP-date)
     bucket:     null,                 // enables bucket-hash discovery when set
     global:     null,                 // "true" indicates a global rate limit
     scope:      null,                 // "global" indicates a global rate limit

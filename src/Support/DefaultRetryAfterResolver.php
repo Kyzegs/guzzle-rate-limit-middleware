@@ -14,10 +14,7 @@ class DefaultRetryAfterResolver implements RetryAfterResolverInterface
 {
     public function resolve(ResponseInterface $response, Headers $headers, ClockInterface $clock): float
     {
-        $retryAfter = HeaderParser::value($response, $headers->retryAfter);
-
-        return $retryAfter !== null
-            ? max(0.0, (float) $retryAfter)
-            : RateLimit::fromResponse($response, $headers, $clock)->secondsUntilReset($clock);
+        return HeaderParser::delay($response, $headers->retryAfter, $clock->now())
+            ?? RateLimit::fromResponse($response, $headers, $clock)->secondsUntilReset($clock);
     }
 }
