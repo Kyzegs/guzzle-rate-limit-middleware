@@ -34,6 +34,9 @@
 - Add pluggable retry strategies: pass a `RetryStrategyInterface` as `retryStrategy:` to decide what is retried, how long to wait, and what throws `RateLimitExceededException`. The default `StatusCodeRetryStrategy` keeps the existing behaviour.
 - Add `ExponentialBackoffRetryStrategy`, which backs off with full jitter when a retried response doesn't say how long to wait.
 - Add `GitHubRetryStrategy` and use it in `RateLimitMiddleware::github()`: primary and secondary rate limits are retried whether they come as a 403 or a 429, plain 403s are not, and exhausted 403 rate limits throw.
+- Add `RateLimitParserInterface` and a `parser:` option, for APIs whose rate limit doesn't fit one number per header. A parser returning `null` leaves the stored state untouched.
+- Read the IETF draft's structured `RateLimit`/`RateLimit-Policy` fields (current list form and older dictionary form) in `RateLimitMiddleware::ietf()`, tracking the policy that runs out first. The separate `RateLimit-*` headers still work.
+- Add `FractionHeaderParser` for "used/limit" leaky-bucket headers, `HostBucketResolver`, and a `RateLimitMiddleware::shopify()` preset.
 
 ## 1.2.0
 

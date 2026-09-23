@@ -18,12 +18,14 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\MajorParameterAwareInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RateLimitParserInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryStrategyInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\InvalidRequestLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
+use Kyzegs\GuzzleRateLimitMiddleware\Parser\HeaderRateLimitParser;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Retry\StatusCodeRetryStrategy;
@@ -41,8 +43,8 @@ use Throwable;
  *
  * Before each request it reads the persisted bucket state and, if the bucket is
  * exhausted, sleeps until the window resets. Once the response lands it
- * persists the fresh state from the response headers. A rate limit that slips
- * through is retried as the {@see RetryStrategyInterface} decides (by default:
+ * persists the fresh state the {@see RateLimitParserInterface} reads from the
+ * response. A rate limit that slips through is retried as the {@see RetryStrategyInterface} decides (by default:
  * a 429, honouring Retry-After, up to Options::$maxRetries times), then
  * optionally rejects with RateLimitExceededException.
  *
@@ -91,6 +93,8 @@ final class RateLimitHandler implements HandlerInterface
      */
     private array $probes = [];
 
+    private readonly RateLimitParserInterface $parser;
+
     public function __construct(
         private readonly Options $options,
         private readonly Headers $headers,
@@ -103,10 +107,12 @@ final class RateLimitHandler implements HandlerInterface
         private readonly IdentityResolverInterface $identityResolver = new AuthorizationIdentityResolver(),
         private readonly RetryAfterResolverInterface $retryAfterResolver = new DefaultRetryAfterResolver(),
         ?RetryStrategyInterface $retryStrategy = null,
+        ?RateLimitParserInterface $parser = null,
     ) {
         $this->bucketKeys = new BucketKeyResolver($this->store);
         $this->retryStrategy = $retryStrategy ?? StatusCodeRetryStrategy::fromOptions($this->options);
         $this->retryLimit = $retryStrategy === null ? $this->options->maxRetries : null;
+        $this->parser = $parser ?? new HeaderRateLimitParser($this->headers);
     }
 
     /**
@@ -294,6 +300,8 @@ final class RateLimitHandler implements HandlerInterface
      * Both writes below read the stored window first, so they run under the
      * bucket's lock: a reservation landing between the read and the write
      * would otherwise be overwritten, handing a spent slot back.
+     *
+     * A response the parser finds nothing in leaves a known window alone.
      */
     private function persist(
         ResponseInterface $response,
@@ -302,16 +310,20 @@ final class RateLimitHandler implements HandlerInterface
         string $identity,
         string $effectiveKey,
     ): void {
-        if (! $this->headers->presentIn($response)) {
+        $rateLimit = $this->parser->parse($response, $this->clock);
+
+        if ($rateLimit === null) {
             $this->underBucketLock($effectiveKey, fn () => $this->recordUnmetered($response, $effectiveKey));
 
             return;
         }
 
-        $rateLimit = RateLimit::fromResponse($response, $this->headers, $this->clock);
+        // Discovery is switched on by Headers, not by the parser, so a parser
+        // that only knows the allowance still gets re-keyed by the bucket header.
+        $bucketHash = $rateLimit->bucketHash ?? HeaderParser::value($response, $this->headers->bucket);
 
-        if ($this->headers->needsToCheckBucketHeader() && $rateLimit->bucketHash !== null) {
-            $effectiveKey = $this->bucketKeys->observe($routeKey, $rateLimit->bucketHash, $major, $identity);
+        if ($this->headers->needsToCheckBucketHeader() && $bucketHash !== null) {
+            $effectiveKey = $this->bucketKeys->observe($routeKey, (string) $bucketHash, $major, $identity);
         }
 
         $this->underBucketLock($effectiveKey, function () use ($effectiveKey, $rateLimit): void {

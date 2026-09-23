@@ -14,11 +14,13 @@ use Kyzegs\GuzzleRateLimitMiddleware\Config\InvalidRequestLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RateLimitParserInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryStrategyInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\InvalidRequestLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Handler\RateLimitHandler;
+use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Retry\ExponentialBackoffRetryStrategy;
@@ -31,6 +33,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\RecordingSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\GuardedStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyLockFactory;
+use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\StubRateLimitParser;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\TrackingLockFactory;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\RequestInterface;
@@ -767,6 +770,80 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertSame([3.0, 5.0], $this->sleeper->sleeps); // 2s and 4s backoff + 1 buffer each
     }
 
+    public function test_custom_parser_supplies_the_rate_limit(): void
+    {
+        $store = $this->store();
+        $request = new Request('GET', 'https://api.test/users');
+        // The response itself says nothing; only the parser knows the bucket is spent.
+        $parser = new StubRateLimitParser([new RateLimit(limit: 5, remaining: 0, reset: 1_010.0)]);
+        $handler = $this->handler($store, parser: $parser);
+
+        $handler->handle($this->responder(new Response(200)), $request, [])->wait();
+        $handler->handle($this->responder(new Response(200)), $request, [])->wait();
+
+        $this->assertSame(2, $parser->calls);
+        $this->assertSame(1, $this->sleeper->count());
+        $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_null_parse_skips_persisting(): void
+    {
+        $store = $this->store();
+        $request = new Request('GET', 'https://api.test/users');
+        // Headers the default parser would store as an exhausted bucket.
+        $exhausted = new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '10']);
+        $parser = new StubRateLimitParser([null, null]);
+        $handler = $this->handler($store, parser: $parser);
+
+        $handler->handle($this->responder($exhausted), $request, [])->wait();
+        $handler->handle($this->responder($exhausted), $request, [])->wait();
+
+        $this->assertSame(2, $parser->calls);
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_null_parse_keeps_the_stored_state(): void
+    {
+        $store = $this->store();
+        $request = new Request('GET', 'https://api.test/users');
+        $parser = new StubRateLimitParser([new RateLimit(limit: 2, remaining: 1, reset: 1_010.0), null]);
+        $handler = $this->handler($store, parser: $parser);
+        $respond = $this->responder(new Response(200));
+
+        // Discovers one slot left, then spends it on a response that reports nothing.
+        $handler->handle($respond, $request, [])->wait();
+        $handler->handle($respond, $request, [])->wait();
+        $this->assertSame(0, $this->sleeper->count());
+
+        // Had the second response overwritten the state, this would not wait.
+        $handler->handle($respond, $request, [])->wait();
+
+        $this->assertSame(1, $this->sleeper->count());
+        $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_bucket_header_still_rekeys_when_the_parser_does_not_report_one(): void
+    {
+        $store = $this->store();
+        $handler = $this->handler(
+            $store,
+            headers: Headers::discord(),
+            resolver: new DiscordBucketResolver(),
+            parser: new StubRateLimitParser([new RateLimit(limit: 5, remaining: 0, reset: 1_005.0)]),
+        );
+
+        $handler->handle(
+            $this->responder(new Response(200, ['X-RateLimit-Bucket' => 'abcd'])),
+            new Request('POST', 'https://discord.com/api/v10/channels/123/messages'),
+            [],
+        )->wait();
+
+        $stored = $store->get('bucket:' . hash('sha256', "unauthenticated\0abcd\0channel_id=123"));
+
+        $this->assertNotNull($stored, 'State should be stored under the discovered bucket key.');
+        $this->assertSame(0, $stored['remaining']);
+    }
+
     private function store(): InMemoryStore
     {
         return new InMemoryStore($this->clock);
@@ -779,6 +856,7 @@ final class RateLimitHandlerTest extends TestCase
         ?BucketResolverInterface $resolver = null,
         ?LockFactoryInterface $lockFactory = null,
         ?RetryStrategyInterface $retryStrategy = null,
+        ?RateLimitParserInterface $parser = null,
     ): RateLimitHandler {
         return new RateLimitHandler(
             $options,
@@ -790,6 +868,7 @@ final class RateLimitHandlerTest extends TestCase
             $this->clock,
             $this->sleeper,
             retryStrategy: $retryStrategy,
+            parser: $parser,
         );
     }
 

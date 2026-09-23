@@ -16,11 +16,15 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\IdentityResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryStrategyInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RateLimitParserInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Handler\RateLimitHandler;
+use Kyzegs\GuzzleRateLimitMiddleware\Parser\FractionHeaderParser;
+use Kyzegs\GuzzleRateLimitMiddleware\Parser\IetfRateLimitParser;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DiscordBucketResolver;
+use Kyzegs\GuzzleRateLimitMiddleware\Resolver\HostBucketResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\AuthorizationIdentityResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Retry\GitHubRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
@@ -41,7 +45,7 @@ use Psr\Log\NullLogger;
  *
  * Use the named-argument {@see create()} factory for full control, or the
  * per-API presets ({@see discord()}, {@see github()}, {@see twitter()},
- * {@see ietf()}, {@see gitlab()}, {@see twitch()}, {@see reddit()}).
+ * {@see ietf()}, {@see gitlab()}, {@see twitch()}, {@see reddit()}, {@see shopify()}).
  */
 final class RateLimitMiddleware
 {
@@ -60,6 +64,7 @@ final class RateLimitMiddleware
         ?IdentityResolverInterface $identityResolver = null,
         ?RetryAfterResolverInterface $retryAfterResolver = null,
         ?RetryStrategyInterface $retryStrategy = null,
+        ?RateLimitParserInterface $parser = null,
     ) {
         $clock = match (true) {
             $clock instanceof ClockInterface => $clock,
@@ -79,6 +84,7 @@ final class RateLimitMiddleware
             $identityResolver ?? new AuthorizationIdentityResolver(),
             $retryAfterResolver ?? new DefaultRetryAfterResolver(),
             $retryStrategy,
+            $parser,
         );
     }
 
@@ -99,6 +105,7 @@ final class RateLimitMiddleware
         ?IdentityResolverInterface $identityResolver = null,
         ?RetryAfterResolverInterface $retryAfterResolver = null,
         ?RetryStrategyInterface $retryStrategy = null,
+        ?RateLimitParserInterface $parser = null,
     ): self {
         return new self(
             options: $options,
@@ -112,6 +119,7 @@ final class RateLimitMiddleware
             identityResolver: $identityResolver,
             retryAfterResolver: $retryAfterResolver,
             retryStrategy: $retryStrategy,
+            parser: $parser,
         );
     }
 
@@ -168,9 +176,34 @@ final class RateLimitMiddleware
         return self::create(headers: Headers::twitter(), store: $store, logger: $logger);
     }
 
+    /**
+     * The IETF draft's structured `RateLimit`/`RateLimit-Policy` fields, falling
+     * back to the older separate `RateLimit-*` headers.
+     */
     public static function ietf(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
     {
-        return self::create(headers: Headers::ietf(), store: $store, logger: $logger);
+        return self::create(
+            headers: Headers::ietf(),
+            store: $store,
+            logger: $logger,
+            parser: new IetfRateLimitParser(),
+        );
+    }
+
+    /**
+     * Shopify's REST Admin API: a leaky bucket per app and store, reported as
+     * "used/limit" in `X-Shopify-Shop-Api-Call-Limit`. Every endpoint drains
+     * the same bucket, so state is kept per shop host rather than per route.
+     * A 429 is retried after its `Retry-After`.
+     */
+    public static function shopify(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
+    {
+        return self::create(
+            store: $store,
+            logger: $logger,
+            resolver: new HostBucketResolver(),
+            parser: new FractionHeaderParser('X-Shopify-Shop-Api-Call-Limit'),
+        );
     }
 
     public static function gitlab(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
