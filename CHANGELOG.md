@@ -17,6 +17,7 @@
 - Record a response's bucket state under the bucket's lock. The merge with the stored window ran unlocked, so a reservation made by another worker in between could be overwritten and its spent slot handed back.
 - Run static analysis on PHPStan 2.
 - Ship `Testing\FakeClock` and `Testing\RecordingSleeper` so applications can assert rate-limit delays in their own tests without real waits.
+- Validate `Options`, `GlobalLimit` and `InvalidRequestLimit` on construction. Out-of-range values (negative retries or delays, jitter outside 0-100, empty windows, non-HTTP status codes) now throw `InvalidArgumentException` instead of misbehaving at request time.
 
 ## 1.2.0
 

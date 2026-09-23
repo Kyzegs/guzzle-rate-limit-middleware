@@ -145,6 +145,9 @@ $middleware = RateLimitMiddleware::create(options: $options);
 // Presets: Options::default(), Options::conservative(), Options::aggressive()
 ```
 
+Out-of-range values (negative retries, jitter outside 0-100, a zero-length
+window, …) throw an `InvalidArgumentException` when the config is built.
+
 When retries are exhausted on a `429` and `throwOnRateLimit` is `true`, a
 `Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException` is thrown
 (carrying the request, response, retry-after seconds and global flag).

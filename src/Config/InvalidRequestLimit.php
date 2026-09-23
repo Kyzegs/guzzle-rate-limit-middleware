@@ -11,5 +11,9 @@ final class InvalidRequestLimit
         public readonly int $maxRequests = 9000,
         public readonly float $windowSeconds = 600.0,
         public readonly array $statusCodes = [401, 403, 429],
-    ) {}
+    ) {
+        Assert::atLeast('InvalidRequestLimit::$maxRequests', $maxRequests, 1);
+        Assert::positive('InvalidRequestLimit::$windowSeconds', $windowSeconds);
+        Assert::statusCodes('InvalidRequestLimit::$statusCodes', $statusCodes);
+    }
 }
