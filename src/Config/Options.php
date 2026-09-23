@@ -17,6 +17,9 @@ final class Options
      * @param bool       $throwOnRateLimit    Throw RateLimitExceededException once retries are exhausted on a 429.
      * @param int        $maxStoreTtl         Upper bound (seconds) for how long bucket state is cached.
      * @param int[]      $retryStatusCodes    HTTP status codes that trigger a retry.
+     * @param float|null $maxDelaySeconds     Longest delay to accept; a longer one throws RateLimitDelayExceededException.
+     *
+     * @throws \InvalidArgumentException When a value is out of range.
      */
     public function __construct(
         public readonly int $maxRetries = 3,
@@ -29,6 +32,15 @@ final class Options
         public readonly ?InvalidRequestLimit $invalidRequestLimit = null,
         public readonly ?float $maxDelaySeconds = null,
     ) {
+        Assert::atLeast('Options::$maxRetries', $maxRetries, 0);
+        Assert::atLeast('Options::$safetyBufferSeconds', $safetyBufferSeconds, 0);
+        Assert::between('Options::$jitterPercent', $jitterPercent, 0, 100);
+        Assert::atLeast('Options::$maxStoreTtl', $maxStoreTtl, 1);
+        Assert::statusCodes('Options::$retryStatusCodes', $retryStatusCodes);
+
+        if ($maxDelaySeconds !== null) {
+            Assert::atLeast('Options::$maxDelaySeconds', $maxDelaySeconds, 0);
+        }
     }
 
     /**

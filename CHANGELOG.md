@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Validate `Options`, `GlobalLimit` and `InvalidRequestLimit` on construction. Out-of-range values (negative retries or delays, jitter outside 0-100, empty windows, non-HTTP status codes) now throw `InvalidArgumentException` instead of misbehaving at request time.
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.
