@@ -8,10 +8,13 @@ use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Limit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\LimitAlgorithm;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Handler\RateLimitHandler;
 use Kyzegs\GuzzleRateLimitMiddleware\Resolver\DefaultBucketResolver;
@@ -336,6 +339,81 @@ final class RateLimitHandlerTest extends TestCase
 
         $this->assertSame(1, $this->sleeper->count(), 'Spent reservations must not be handed back.');
         $this->assertEqualsWithDelta(11.0, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_client_side_limit_waits_include_the_safety_buffer(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            safetyBufferSeconds: 0.5,
+            limits: [Limit::perSecond(1, LimitAlgorithm::FixedWindow)],
+        ));
+        $respond = $this->responder(new Response(200));
+        $request = new Request('GET', 'https://api.test/users');
+
+        $handler->handle($respond, $request, []);
+        $handler->handle($respond, $request, []);
+
+        $this->assertSame(1, $this->sleeper->count());
+        $this->assertEqualsWithDelta(1.5, $this->sleeper->sleeps[0], 0.001);
+    }
+
+    public function test_client_side_wait_beyond_the_maximum_throws_before_sending(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            safetyBufferSeconds: 0,
+            maxDelaySeconds: 10,
+            limits: [
+                Limit::perSecond(2, LimitAlgorithm::FixedWindow, name: 'burst'),
+                Limit::perHour(
+                    1,
+                    LimitAlgorithm::FixedWindow,
+                    appliesTo: static fn (RequestInterface $request): bool => $request->getMethod() === 'POST',
+                    name: 'writes',
+                ),
+            ],
+        ));
+        $sent = 0;
+        $respond = static function () use (&$sent): ResponseInterface {
+            $sent++;
+
+            return new Response(200);
+        };
+        $write = new Request('POST', 'https://api.test/messages');
+
+        $handler->handle($respond, $write, []);
+
+        try {
+            $handler->handle($respond, $write, []);
+            $this->fail('An hour-long wait exceeds maxDelaySeconds.');
+        } catch (RateLimitDelayExceededException $e) {
+            $this->assertEqualsWithDelta(3600.0, $e->retryAfter, 0.001);
+        }
+
+        // The refused write took nothing from the per-second budget either.
+        $handler->handle($respond, new Request('GET', 'https://api.test/messages'), []);
+
+        $this->assertSame(2, $sent);
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_retries_count_against_client_side_limits(): void
+    {
+        $handler = $this->handler($this->store(), new Options(
+            safetyBufferSeconds: 0,
+            limits: [Limit::perSecond(1, LimitAlgorithm::FixedWindow)],
+        ));
+
+        $response = $handler->handle(
+            $this->queue(new Response(429, ['Retry-After' => '0']), new Response(200)),
+            new Request('GET', 'https://api.test/users'),
+            [],
+        );
+
+        // The immediate retry is another request the API counts.
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame(2, $this->sleeper->count());
+        $this->assertEqualsWithDelta(0.0, $this->sleeper->sleeps[0], 0.001);
+        $this->assertEqualsWithDelta(1.0, $this->sleeper->sleeps[1], 0.001);
     }
 
     private function store(): InMemoryStore

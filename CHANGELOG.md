@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add client-side limits (`Options::$limits`): self-imposed fixed-window, sliding-window and token-bucket budgets, scoped per identity, host, route or everything and optionally filtered per request, for APIs that document limits without sending headers.
+- A request waits until every applicable limit has room and consumes from none of them while it waits.
+
 ## 1.2.0
 
 - Reserve bucket capacity under the lock instead of holding it across the request, so a bucket runs as many requests in parallel as it has remaining.

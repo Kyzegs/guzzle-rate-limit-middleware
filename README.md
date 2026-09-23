@@ -12,6 +12,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 - 💾 **Cross-process state** — share rate-limit state via PSR-16 (Redis, Memcached, Laravel/Symfony cache), the filesystem, or in-memory.
 - ⏳ **Pre-emptive delays** — sleeps until a bucket resets instead of failing.
 - 🔁 **429 retries** — honours `Retry-After` and retries up to a configurable limit, then optionally throws.
+- 🚦 **Client-side limits** — your own budgets (e.g. 10/s *and* 5,000/h) for APIs that send no headers.
 - 🪣 **Bucket-hash discovery** — adapts to APIs (like Discord) that assign buckets dynamically.
 - 🔒 **Optional locking** — plug in a distributed lock to serialise concurrent callers.
 - 🧪 **Fully testable** — the clock and sleeper are injectable, so timing is deterministic in tests.
@@ -148,6 +149,65 @@ $middleware = RateLimitMiddleware::create(options: $options);
 When retries are exhausted on a `429` and `throwOnRateLimit` is `true`, a
 `Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException` is thrown
 (carrying the request, response, retry-after seconds and global flag).
+
+## Client-side limits
+
+Some APIs document their limits but send no headers, many enforce several at
+once, and sometimes you just want to stay well under a provider's ceiling.
+Client-side limits are budgets you declare yourself, enforced before every
+request whether or not the API reports anything:
+
+```php
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Limit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
+use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
+use Kyzegs\GuzzleRateLimitMiddleware\Store\Psr16Store;
+use Psr\Http\Message\RequestInterface;
+
+// 10 requests/second and 5,000/hour per API key, plus 30 searches/minute.
+$middleware = RateLimitMiddleware::create(
+    store: new Psr16Store($psr16Cache),
+    options: new Options(
+        safetyBufferSeconds: 0.05,
+        limits: [
+            Limit::perSecond(10),
+            Limit::perHour(5000),
+            Limit::perMinute(
+                30,
+                appliesTo: fn (RequestInterface $request): bool => $request->getUri()->getPath() === '/v1/search',
+                name: 'search',
+            ),
+        ],
+    ),
+);
+```
+
+A request waits until every limit that applies to it has room, sleeping once
+for the longest wait, and takes nothing from any of them until it can take
+from all: a request waiting out the hourly budget never holds a slot of the
+per-second one.
+
+| Algorithm | Behaviour |
+|-----------|-----------|
+| `SlidingWindow` (default) | Counts the previous window in proportion to how much of it still overlaps, smoothing out bursts at window edges. |
+| `FixedWindow` | `maxRequests` per window, opened by the first request. Simplest, but allows up to twice the budget across a window edge. |
+| `TokenBucket` | Bursts up to `maxRequests`, then refills `maxRequests` per window continuously. |
+
+| Scope | One budget shared by |
+|-------|----------------------|
+| `Identity` (default) | requests with the same credentials |
+| `Host` | requests with the same credentials to the same host |
+| `Route` | requests with the same credentials to the same route, as the bucket resolver groups them |
+| `Everything` | every request, whatever its credentials |
+
+Build limits with `new Limit($maxRequests, $windowSeconds, $algorithm, $scope, $appliesTo, $name)`,
+or the `Limit::perSecond()`, `perMinute()`, `perHour()` and `perDay()` shorthands.
+
+Waits get the same safety buffer and jitter as header-driven ones and respect
+`maxDelaySeconds`, so keep `safetyBufferSeconds` small for per-second budgets.
+State lives in the configured store under hashed keys, so processes sharing a
+store share the budgets; add a lock factory if they run concurrently. Limits
+that differ only in `appliesTo` need distinct names, or they share one budget.
 
 ## Bucket resolution
 
