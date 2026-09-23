@@ -34,12 +34,19 @@ final class Headers
         );
     }
 
+    /**
+     * GitHub's primary limit is shared by every endpoint in a resource (core,
+     * search, graphql, ...), named in X-RateLimit-Resource. Treating it as the
+     * bucket keeps one allowance per resource instead of one per path, which
+     * would let every path spend the same remaining count.
+     */
     public static function github(): self
     {
         return new self(
             limit: 'X-RateLimit-Limit',
             remaining: 'X-RateLimit-Remaining',
             reset: 'X-RateLimit-Reset',
+            bucket: 'X-RateLimit-Resource',
             retryAfter: 'Retry-After',
         );
     }

@@ -7,6 +7,7 @@
 - Accept `Retry-After` as an HTTP-date as well as delay-seconds; a date was previously read as "retry immediately".
 - Treat a route whose successful responses carry no rate-limit headers as unmetered for a minute, instead of probing it one request at a time under the lock.
 - Keep a bucket's known window when a response without rate-limit headers (e.g. a proxy error page) comes back, so spent capacity isn't handed back.
+- Key GitHub state by `X-RateLimit-Resource` in `Headers::github()`, so endpoints that share GitHub's `core` (or `search`, `graphql`, …) allowance no longer each believe they have the whole remaining count.
 - Scope discovered buckets to the request identity. Two tokens that share a bucket hash (e.g. two Discord bots on the same channel route) no longer share, and exhaust, each other's allowance. Existing bucket state is re-learned after upgrading.
 
 ## 1.2.0

@@ -360,6 +360,29 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertSame(0, $this->sleeper->count());
     }
 
+    public function test_github_endpoints_share_their_resource_allowance(): void
+    {
+        $handler = $this->handler($this->store(), new Options(), Headers::github());
+        $core = static fn (int $remaining): ResponseInterface => new Response(200, [
+            'X-RateLimit-Limit' => '5000',
+            'X-RateLimit-Remaining' => (string) $remaining,
+            'X-RateLimit-Reset' => '60',
+            'X-RateLimit-Resource' => 'core',
+        ]);
+        $token = ['Authorization' => 'Bearer secret'];
+
+        $handler->handle($this->responder($core(1)), new Request('GET', 'https://api.github.com/user', $token), []);
+        // Another core endpoint spends the last request of the shared allowance ...
+        $handler->handle($this->responder($core(0)), new Request('GET', 'https://api.github.com/repos/a/b', $token), []);
+        $this->assertSame(0, $this->sleeper->count());
+
+        // ... so the first endpoint must not believe it still has one left.
+        $handler->handle($this->responder($core(4999)), new Request('GET', 'https://api.github.com/user', $token), []);
+
+        $this->assertSame(1, $this->sleeper->count());
+        $this->assertEqualsWithDelta(61.0, $this->sleeper->sleeps[0], 0.001); // 60 until reset + 1 buffer
+    }
+
     public function test_lock_is_acquired_and_released(): void
     {
         $lockFactory = new SpyLockFactory();

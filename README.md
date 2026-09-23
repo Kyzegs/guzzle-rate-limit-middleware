@@ -42,7 +42,7 @@ The default middleware reads the standard `X-RateLimit-*` headers and keeps stat
 ### Per-API presets
 
 ```php
-RateLimitMiddleware::github();   // X-RateLimit-* headers
+RateLimitMiddleware::github();   // X-RateLimit-* headers, one bucket per X-RateLimit-Resource
 RateLimitMiddleware::twitter();  // x-rate-limit-* headers
 RateLimitMiddleware::ietf();     // RateLimit-* (IETF draft)
 RateLimitMiddleware::discord();  // Discord headers + bucket-hash discovery
@@ -184,6 +184,10 @@ stores state under the discovered bucket and re-keys automatically if the API
 reassigns a route. `RateLimitMiddleware::discord()` enables this together with a
 `DiscordBucketResolver` that respects Discord's major parameters
 (`channel_id`, `guild_id`, `webhook_id` and `webhook_token`).
+
+`RateLimitMiddleware::github()` uses the same mechanism with
+`X-RateLimit-Resource`, so every endpoint in a resource (`core`, `search`,
+`graphql`, …) shares one allowance per token, as GitHub counts it.
 
 ## Concurrency / locking
 
