@@ -19,6 +19,7 @@
 - Ship `Testing\FakeClock` and `Testing\RecordingSleeper` so applications can assert rate-limit delays in their own tests without real waits.
 - Validate `Options`, `GlobalLimit` and `InvalidRequestLimit` on construction. Out-of-range values (negative retries or delays, jitter outside 0-100, empty windows, non-HTTP status codes) now throw `InvalidArgumentException` instead of misbehaving at request time.
 - Accept a PSR-20 clock as the middleware `clock:`, and add `Psr20Clock` to adapt one wherever a `ClockInterface` is expected.
+- Add GitLab, Twitch and Reddit presets: `RateLimitMiddleware::gitlab()`, `::twitch()` and `::reddit()`, with matching `Headers` factories.
 
 ## 1.2.0
 
