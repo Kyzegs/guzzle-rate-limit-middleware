@@ -9,9 +9,11 @@ use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Psr7\Response;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
+use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
+use Kyzegs\GuzzleRateLimitMiddleware\Retry\GitHubRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\RecordingSleeper;
@@ -46,6 +48,31 @@ final class RateLimitMiddlewareTest extends TestCase
         $client->get('https://api.test/users');
         $this->assertSame(1, $sleeper->count());
         $this->assertEqualsWithDelta(21.0, $sleeper->sleeps[0], 0.001); // 20 + 1 buffer
+    }
+
+    public function test_create_retries_by_the_given_strategy(): void
+    {
+        $clock = new FakeClock(1_700_000_000.0);
+        $sleeper = new RecordingSleeper($clock);
+
+        $mock = new MockHandler([
+            new Response(403, ['Retry-After' => '5']),
+            new Response(200, ['X-RateLimit-Remaining' => '4999', 'X-RateLimit-Reset' => '1700003600']),
+        ]);
+
+        $stack = HandlerStack::create($mock);
+        $stack->push(RateLimitMiddleware::create(
+            headers: Headers::github(),
+            store: new InMemoryStore($clock),
+            clock: $clock,
+            sleeper: $sleeper,
+            retryStrategy: new GitHubRetryStrategy(),
+        ));
+
+        $client = new Client(['handler' => $stack]);
+
+        $this->assertSame(200, $client->get('https://api.github.com/user')->getStatusCode());
+        $this->assertSame([6.0], $sleeper->sleeps); // 5s Retry-After + 1 buffer
     }
 
     public function test_passes_through_successful_responses(): void
