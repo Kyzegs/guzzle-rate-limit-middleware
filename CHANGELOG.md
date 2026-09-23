@@ -40,6 +40,9 @@
 - Add client-side limits (`Options::$limits`): self-imposed fixed-window, sliding-window and token-bucket budgets, scoped per identity, host, route or everything and optionally filtered per request, for APIs that document limits without sending headers.
 - A request waits until every applicable limit has room and consumes from none of them while it waits.
 - Add a `rate_limit` request option to override `max_delay`, `max_retries`, the bucket or the identity for a single request, or bypass the middleware with `enabled: false`. Invalid values throw `InvalidArgumentException`.
+- Add optional PSR-14 events (`RequestDelayed`, `RetryScheduled`, `RateLimitExceeded`, `RateLimitUpdated`, `InvalidRequestLimitReached`) through a new `events` argument on the middleware, its presets and `RateLimitHandler`.
+- Add structured PSR-3 context to log records, and a debug record when the global budget delays a request.
+- Require `psr/event-dispatcher` (interfaces only).
 
 ## 1.2.0
 

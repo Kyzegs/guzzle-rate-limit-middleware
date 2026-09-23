@@ -35,6 +35,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Support\UsleepSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DefaultRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
 use Psr\Clock\ClockInterface as PsrClockInterface;
+use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -46,6 +47,8 @@ use Psr\Log\NullLogger;
  * Use the named-argument {@see create()} factory for full control, or the
  * per-API presets ({@see discord()}, {@see github()}, {@see twitter()},
  * {@see ietf()}, {@see gitlab()}, {@see twitch()}, {@see reddit()}, {@see shopify()}).
+ * Every one of them takes an optional PSR-14 `events` dispatcher for observing
+ * delays, retries and limits.
  */
 final class RateLimitMiddleware
 {
@@ -65,6 +68,7 @@ final class RateLimitMiddleware
         ?RetryAfterResolverInterface $retryAfterResolver = null,
         ?RetryStrategyInterface $retryStrategy = null,
         ?RateLimitParserInterface $parser = null,
+        ?EventDispatcherInterface $events = null,
     ) {
         $clock = match (true) {
             $clock instanceof ClockInterface => $clock,
@@ -85,6 +89,7 @@ final class RateLimitMiddleware
             $retryAfterResolver ?? new DefaultRetryAfterResolver(),
             $retryStrategy,
             $parser,
+            $events,
         );
     }
 
@@ -106,6 +111,7 @@ final class RateLimitMiddleware
         ?RetryAfterResolverInterface $retryAfterResolver = null,
         ?RetryStrategyInterface $retryStrategy = null,
         ?RateLimitParserInterface $parser = null,
+        ?EventDispatcherInterface $events = null,
     ): self {
         return new self(
             options: $options,
@@ -120,6 +126,7 @@ final class RateLimitMiddleware
             retryAfterResolver: $retryAfterResolver,
             retryStrategy: $retryStrategy,
             parser: $parser,
+            events: $events,
         );
     }
 
@@ -141,6 +148,7 @@ final class RateLimitMiddleware
         ?LockFactoryInterface $lockFactory = null,
         Options $options = new Options(globalLimit: new GlobalLimit(), invalidRequestLimit: new InvalidRequestLimit()),
         ?ClockInterface $clock = null,
+        ?EventDispatcherInterface $events = null,
     ): self {
         $clock ??= new SystemClock();
 
@@ -154,6 +162,7 @@ final class RateLimitMiddleware
             clock: $clock,
             identityResolver: new AuthorizationIdentityResolver(),
             retryAfterResolver: new DiscordRetryAfterResolver(),
+            events: $events,
         );
     }
 
@@ -161,32 +170,43 @@ final class RateLimitMiddleware
      * GitHub answers a rate limit with a 403 as well as a 429, so this retries
      * by {@see GitHubRetryStrategy} rather than by status code alone.
      */
-    public static function github(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
+    public static function github(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
         return self::create(
             headers: Headers::github(),
             store: $store,
             logger: $logger,
             retryStrategy: new GitHubRetryStrategy(),
+            events: $events,
         );
     }
 
-    public static function twitter(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
-        return self::create(headers: Headers::twitter(), store: $store, logger: $logger);
+    public static function twitter(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
+        return self::create(headers: Headers::twitter(), store: $store, logger: $logger, events: $events);
     }
 
     /**
      * The IETF draft's structured `RateLimit`/`RateLimit-Policy` fields, falling
      * back to the older separate `RateLimit-*` headers.
      */
-    public static function ietf(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
+    public static function ietf(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
         return self::create(
             headers: Headers::ietf(),
             store: $store,
             logger: $logger,
             parser: new IetfRateLimitParser(),
+            events: $events,
         );
     }
 
@@ -196,29 +216,42 @@ final class RateLimitMiddleware
      * the same bucket, so state is kept per shop host rather than per route.
      * A 429 is retried after its `Retry-After`.
      */
-    public static function shopify(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
+    public static function shopify(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
         return self::create(
             store: $store,
             logger: $logger,
             resolver: new HostBucketResolver(),
             parser: new FractionHeaderParser('X-Shopify-Shop-Api-Call-Limit'),
+            events: $events,
         );
     }
 
-    public static function gitlab(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
-        return self::create(headers: Headers::gitlab(), store: $store, logger: $logger);
+    public static function gitlab(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
+        return self::create(headers: Headers::gitlab(), store: $store, logger: $logger, events: $events);
     }
 
-    public static function twitch(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
-        return self::create(headers: Headers::twitch(), store: $store, logger: $logger);
+    public static function twitch(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
+        return self::create(headers: Headers::twitch(), store: $store, logger: $logger, events: $events);
     }
 
-    public static function reddit(?StoreInterface $store = null, ?LoggerInterface $logger = null): self
-    {
-        return self::create(headers: Headers::reddit(), store: $store, logger: $logger);
+    public static function reddit(
+        ?StoreInterface $store = null,
+        ?LoggerInterface $logger = null,
+        ?EventDispatcherInterface $events = null,
+    ): self {
+        return self::create(headers: Headers::reddit(), store: $store, logger: $logger, events: $events);
     }
 
     /**

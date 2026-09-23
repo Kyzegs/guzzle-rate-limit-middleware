@@ -13,6 +13,9 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\DelayReason;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\RequestDelayed;
+use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -56,6 +59,7 @@ final class ClientLimiter
         private readonly SleeperInterface $sleeper,
         private readonly Closure $margin,
         private readonly LoggerInterface $logger = new NullLogger(),
+        private readonly ?EventDispatcherInterface $events = null,
     ) {
     }
 
@@ -85,6 +89,7 @@ final class ClientLimiter
                 $now = $this->clock->now();
                 $delay = 0.0;
                 $blocking = null;
+                $blockingKey = '';
                 $claims = [];
 
                 foreach ($limits as $key => $limit) {
@@ -93,6 +98,7 @@ final class ClientLimiter
                     if ($claim['delay'] > self::TOLERANCE && $claim['delay'] > $delay) {
                         $delay = $claim['delay'];
                         $blocking = $limit;
+                        $blockingKey = $key;
                     }
 
                     $claims[$key] = $claim;
@@ -118,6 +124,8 @@ final class ClientLimiter
                 $this->describe($blocking),
                 $delay,
             ));
+
+            $this->events?->dispatch(new RequestDelayed($request, $delay, DelayReason::ClientLimit, $blockingKey));
 
             $this->sleeper->sleep($delay);
         }

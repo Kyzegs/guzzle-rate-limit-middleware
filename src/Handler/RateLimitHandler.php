@@ -23,6 +23,12 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RateLimitParserInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryStrategyInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\DelayReason;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\InvalidRequestLimitReached;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\RateLimitExceeded;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\RateLimitUpdated;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\RequestDelayed;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\RetryScheduled;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\InvalidRequestLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
@@ -35,6 +41,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Support\BucketKeyResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\ClientLimiter;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\JsonBody;
+use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Log\LoggerInterface;
@@ -67,6 +74,10 @@ use Throwable;
  *
  * Client-side limits (Options::$limits) are enforced alongside, through the
  * same store, locks and delay margin, whether or not the API sends headers.
+ *
+ * Every wait, retry and state change is announced to the optional PSR-14
+ * dispatcher (see the Event namespace) and logged with structured context, so
+ * callers can count and export them without parsing log lines.
  */
 final class RateLimitHandler implements HandlerInterface
 {
@@ -118,6 +129,7 @@ final class RateLimitHandler implements HandlerInterface
         private readonly RetryAfterResolverInterface $retryAfterResolver = new DefaultRetryAfterResolver(),
         ?RetryStrategyInterface $retryStrategy = null,
         ?RateLimitParserInterface $parser = null,
+        private readonly ?EventDispatcherInterface $events = null,
     ) {
         $this->bucketKeys = new BucketKeyResolver($this->store);
         $this->retryStrategy = $retryStrategy ?? StatusCodeRetryStrategy::fromOptions($this->options);
@@ -131,6 +143,7 @@ final class RateLimitHandler implements HandlerInterface
             $this->sleeper,
             $this->withMargin(...),
             $this->logger,
+            $this->events,
         );
     }
 
@@ -154,7 +167,7 @@ final class RateLimitHandler implements HandlerInterface
             }
 
             $identity = $this->identity($request, $overrides);
-            $this->enforceInvalidBudget($identity);
+            $this->enforceInvalidBudget($request, $identity);
             $routeKey = $identity . ':' . ($overrides->bucket ?? $this->resolver->resolve($request));
             $major = $this->resolver instanceof MajorParameterAwareInterface
                 ? $this->resolver->majorParameters($request)
@@ -195,7 +208,7 @@ final class RateLimitHandler implements HandlerInterface
             return $probing->then($resume, $resume);
         }
 
-        $probe = $this->reserveBucketCapacity($effectiveKey, $overrides);
+        $probe = $this->reserveBucketCapacity($request, $effectiveKey, $overrides);
 
         try {
             $this->clientLimiter->reserve($request, $identity, $routeKey, fn (float $delay): float => $this->withMargin($delay, $overrides));
@@ -209,12 +222,12 @@ final class RateLimitHandler implements HandlerInterface
         }
 
         $recorded = $transfer->then(
-            function (ResponseInterface $response) use ($routeKey, $major, $effectiveKey, $identity): ResponseInterface {
-                $this->persist($response, $routeKey, $major, $identity, $effectiveKey);
+            function (ResponseInterface $response) use ($routeKey, $major, $effectiveKey, $identity): array {
+                $updated = $this->persist($response, $routeKey, $major, $identity, $effectiveKey);
                 $this->recordGlobalLimit($response, $identity);
                 $this->recordInvalidRequest($response, $identity);
 
-                return $response;
+                return [$response, $updated];
             },
             // Passed on explicitly: without a handler an already-rejected
             // transfer would come straight back to the caller, settled before
@@ -236,7 +249,18 @@ final class RateLimitHandler implements HandlerInterface
         }
 
         return $recorded->then(
-            function (ResponseInterface $response) use ($handler, $request, $options, $overrides, $identity, $routeKey, $major, $tries): ResponseInterface|PromiseInterface {
+            /**
+             * @param array{ResponseInterface, array{string, RateLimit}|null} $recorded
+             */
+            function (array $recorded) use ($handler, $request, $options, $overrides, $identity, $routeKey, $major, $tries): ResponseInterface|PromiseInterface {
+                [$response, $updated] = $recorded;
+
+                // Announced only once a probe's lock is gone, so a slow listener
+                // cannot hold up callers queued behind an unknown bucket.
+                if ($updated !== null) {
+                    $this->dispatch(new RateLimitUpdated($request, $updated[1], $updated[0]));
+                }
+
                 $delay = $this->retryDelay($request, $response, $tries, $overrides);
 
                 if ($delay !== null) {
@@ -279,7 +303,7 @@ final class RateLimitHandler implements HandlerInterface
      * be reserved until a response reveals it, so that one request goes alone
      * and the caller releases the lock once it has landed.
      */
-    private function reserveBucketCapacity(string $effectiveKey, RequestOptions $overrides): ?LockInterface
+    private function reserveBucketCapacity(RequestInterface $request, string $effectiveKey, RequestOptions $overrides): ?LockInterface
     {
         $slept = false;
 
@@ -328,7 +352,14 @@ final class RateLimitHandler implements HandlerInterface
                 'Rate limit bucket "%s" exhausted; sleeping %.2fs until reset.',
                 $effectiveKey,
                 $delay,
-            ));
+            ), [
+                'key' => $effectiveKey,
+                'delay' => $delay,
+                'reason' => DelayReason::Bucket->value,
+                'method' => $request->getMethod(),
+            ]);
+
+            $this->dispatch(new RequestDelayed($request, $delay, DelayReason::Bucket, $effectiveKey));
 
             $this->sleeper->sleep($delay);
             $slept = true;
@@ -345,6 +376,11 @@ final class RateLimitHandler implements HandlerInterface
      * would otherwise be overwritten, handing a spent slot back.
      *
      * A response the parser finds nothing in leaves a known window alone.
+     *
+     * Returns the key the state ended up under with that state, or null when
+     * the response held none.
+     *
+     * @return array{string, RateLimit}|null
      */
     private function persist(
         ResponseInterface $response,
@@ -352,13 +388,13 @@ final class RateLimitHandler implements HandlerInterface
         string $major,
         string $identity,
         string $effectiveKey,
-    ): void {
+    ): ?array {
         $rateLimit = $this->parser->parse($response, $this->clock);
 
         if ($rateLimit === null) {
             $this->underBucketLock($effectiveKey, fn () => $this->recordUnmetered($response, $effectiveKey));
 
-            return;
+            return null;
         }
 
         // Discovery is switched on by Headers, not by the parser, so a parser
@@ -369,11 +405,15 @@ final class RateLimitHandler implements HandlerInterface
             $effectiveKey = $this->bucketKeys->observe($routeKey, (string) $bucketHash, $major, $identity);
         }
 
-        $this->underBucketLock($effectiveKey, function () use ($effectiveKey, $rateLimit): void {
+        $merged = $this->underBucketLock($effectiveKey, function () use ($effectiveKey, $rateLimit): RateLimit {
             $merged = $this->lowestSeen($effectiveKey, $rateLimit);
 
             $this->store->put($effectiveKey, $merged->toArray(), $this->ttlFor($merged));
+
+            return $merged;
         });
+
+        return [$effectiveKey, $merged];
     }
 
     /**
@@ -381,14 +421,20 @@ final class RateLimitHandler implements HandlerInterface
      * it is the request being recorded or another one on the same bucket.
      * Taking it again would block forever on a per-handle lock such as flock,
      * since that probe can only land once this process is free again.
+     *
+     * @template T
+     *
+     * @param callable(): T $write
+     *
+     * @return T
      */
-    private function underBucketLock(string $key, callable $write): void
+    private function underBucketLock(string $key, callable $write): mixed
     {
         $lock = isset($this->probes[$key]) ? null : $this->lockFactory->make($key);
         $lock?->acquire();
 
         try {
-            $write();
+            return $write();
         } finally {
             $lock?->release();
         }
@@ -483,6 +529,7 @@ final class RateLimitHandler implements HandlerInterface
         RequestOptions $overrides,
     ): void {
         $delay = $this->withMargin(max(0.0, $delay), $overrides);
+        $limit = $this->retryLimit === null ? null : $overrides->maxRetries;
         $global = $this->isGlobal($response);
 
         $this->logger->warning(sprintf(
@@ -491,8 +538,26 @@ final class RateLimitHandler implements HandlerInterface
             $request->getMethod(),
             (string) $request->getUri(),
             $global ? ' (global rate limit)' : '',
-            $this->retryLimit === null ? (string) $tries : $tries . '/' . $overrides->maxRetries,
+            $limit === null ? (string) $tries : $tries . '/' . $limit,
             $delay,
+        ), [
+            // The URI is already in the message; keeping it out of the
+            // context stops it spreading into indexed log fields.
+            'method' => $request->getMethod(),
+            'status' => $response->getStatusCode(),
+            'attempt' => $tries,
+            'max_retries' => $limit,
+            'delay' => $delay,
+            'global' => $global,
+        ]);
+
+        $this->dispatch(new RetryScheduled(
+            $request,
+            $response,
+            $tries,
+            $limit,
+            $delay,
+            $global,
         ));
 
         $this->sleeper->sleep($delay);
@@ -504,12 +569,12 @@ final class RateLimitHandler implements HandlerInterface
             return;
         }
 
-        throw new RateLimitExceededException(
-            $request,
-            $response,
-            $this->retryAfter($response),
-            $this->isGlobal($response),
-        );
+        $retryAfter = $this->retryAfter($response);
+        $global = $this->isGlobal($response);
+
+        $this->dispatch(new RateLimitExceeded($request, $response, $retryAfter, $global));
+
+        throw new RateLimitExceededException($request, $response, $retryAfter, $global);
     }
 
     /**
@@ -588,7 +653,23 @@ final class RateLimitHandler implements HandlerInterface
             } finally {
                 $lock->release();
             }
-            $this->sleeper->sleep($this->withMargin($delay, $overrides));
+
+            $delay = $this->withMargin($delay, $overrides);
+
+            $this->logger->debug(sprintf(
+                'Global rate limit "%s" exhausted; sleeping %.2fs until reset.',
+                $key,
+                $delay,
+            ), [
+                'key' => $key,
+                'delay' => $delay,
+                'reason' => DelayReason::GlobalLimit->value,
+                'method' => $request->getMethod(),
+            ]);
+
+            $this->dispatch(new RequestDelayed($request, $delay, DelayReason::GlobalLimit, $key));
+
+            $this->sleeper->sleep($delay);
         }
     }
 
@@ -602,7 +683,7 @@ final class RateLimitHandler implements HandlerInterface
         $this->store->put($key, ['count' => PHP_INT_MAX, 'reset' => $this->clock->now() + $delay, 'blocked_until' => $this->clock->now() + $delay], (int) ceil($delay) + 1);
     }
 
-    private function enforceInvalidBudget(string $identity): void
+    private function enforceInvalidBudget(RequestInterface $request, string $identity): void
     {
         $config = $this->options->invalidRequestLimit;
         if ($config === null) {
@@ -610,7 +691,11 @@ final class RateLimitHandler implements HandlerInterface
         }
         $state = $this->store->get('invalid:' . hash('sha256', $identity));
         if ($state !== null && (int) ($state['count'] ?? 0) >= $config->maxRequests && (float) ($state['reset'] ?? 0.0) > $this->clock->now()) {
-            throw new InvalidRequestLimitExceededException((float) $state['reset'] - $this->clock->now());
+            $retryAfter = (float) $state['reset'] - $this->clock->now();
+
+            $this->dispatch(new InvalidRequestLimitReached($request, $retryAfter));
+
+            throw new InvalidRequestLimitExceededException($retryAfter);
         }
     }
 
@@ -674,5 +759,10 @@ final class RateLimitHandler implements HandlerInterface
             + (int) ceil($this->options->safetyBufferSeconds);
 
         return min(max($seconds, 60), $this->options->maxStoreTtl);
+    }
+
+    private function dispatch(object $event): void
+    {
+        $this->events?->dispatch($event);
     }
 }

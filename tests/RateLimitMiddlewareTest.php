@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kyzegs\GuzzleRateLimitMiddleware\Tests;
 
+use Closure;
 use GuzzleHttp\Client;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
@@ -13,6 +14,8 @@ use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Limit;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\LimitAlgorithm;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\RateLimitUpdated;
+use Kyzegs\GuzzleRateLimitMiddleware\Event\RetryScheduled;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Parser\FractionHeaderParser;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
@@ -21,9 +24,12 @@ use Kyzegs\GuzzleRateLimitMiddleware\Retry\GitHubRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\RecordingSleeper;
+use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RecordingEventDispatcher;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RecordingStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyLockFactory;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Psr\EventDispatcher\EventDispatcherInterface;
 
 final class RateLimitMiddlewareTest extends TestCase
 {
@@ -329,5 +335,65 @@ final class RateLimitMiddlewareTest extends TestCase
         $client->get('https://api.test/users');
 
         $this->assertSame(0, $sleeper->count());
+    }
+
+    public function test_forwards_events_to_the_default_handler(): void
+    {
+        $clock = new FakeClock(1_000.0);
+        $events = new RecordingEventDispatcher();
+
+        $mock = new MockHandler([
+            new Response(429, ['Retry-After' => '2']),
+            new Response(200, ['X-RateLimit-Remaining' => '9', 'X-RateLimit-Reset' => '20']),
+        ]);
+
+        $stack = HandlerStack::create($mock);
+        $stack->push(RateLimitMiddleware::create(
+            store: new InMemoryStore($clock),
+            clock: $clock,
+            sleeper: new RecordingSleeper($clock),
+            events: $events,
+        ));
+
+        (new Client(['handler' => $stack]))->get('https://api.test/users');
+
+        $this->assertSame(
+            [RateLimitUpdated::class, RetryScheduled::class, RateLimitUpdated::class],
+            array_map(get_class(...), $events->events),
+        );
+    }
+
+    /**
+     * @param Closure(EventDispatcherInterface): RateLimitMiddleware $preset
+     */
+    #[DataProvider('presets')]
+    public function test_presets_accept_an_event_dispatcher(Closure $preset): void
+    {
+        $events = new RecordingEventDispatcher();
+
+        $stack = HandlerStack::create(new MockHandler([
+            // Something every preset reads as rate-limit state.
+            new Response(200, ['Retry-After' => '1', 'X-Shopify-Shop-Api-Call-Limit' => '1/40']),
+        ]));
+        $stack->push($preset($events));
+
+        (new Client(['handler' => $stack]))->get('https://api.test/users');
+
+        $this->assertCount(1, $events->ofType(RateLimitUpdated::class));
+    }
+
+    /**
+     * @return iterable<string, array{Closure(EventDispatcherInterface): RateLimitMiddleware}>
+     */
+    public static function presets(): iterable
+    {
+        yield 'discord' => [static fn (EventDispatcherInterface $events) => RateLimitMiddleware::discord(events: $events)];
+        yield 'github' => [static fn (EventDispatcherInterface $events) => RateLimitMiddleware::github(events: $events)];
+        yield 'twitter' => [static fn (EventDispatcherInterface $events) => RateLimitMiddleware::twitter(events: $events)];
+        yield 'ietf' => [static fn (EventDispatcherInterface $events) => RateLimitMiddleware::ietf(events: $events)];
+        yield 'gitlab' => [static fn (EventDispatcherInterface $events) => RateLimitMiddleware::gitlab(events: $events)];
+        yield 'twitch' => [static fn (EventDispatcherInterface $events) => RateLimitMiddleware::twitch(events: $events)];
+        yield 'reddit' => [static fn (EventDispatcherInterface $events) => RateLimitMiddleware::reddit(events: $events)];
+        yield 'shopify' => [static fn (EventDispatcherInterface $events) => RateLimitMiddleware::shopify(events: $events)];
     }
 }
