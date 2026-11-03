@@ -15,6 +15,15 @@ use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
  */
 final class InMemoryStore implements StoreInterface
 {
+    /**
+     * Expired entries are otherwise only dropped when their own key is read,
+     * which never happens to most per-channel or per-resource buckets. A long
+     * running worker would keep them all.
+     */
+    private const SWEEP_EVERY_WRITES = 1000;
+
+    private int $writes = 0;
+
     /** @var array<string, array{data: array<string, mixed>, expires: float}> */
     private array $items = [];
 
@@ -51,6 +60,11 @@ final class InMemoryStore implements StoreInterface
             'data' => $data,
             'expires' => $this->clock->now() + $ttl,
         ];
+
+        if (++$this->writes % self::SWEEP_EVERY_WRITES === 0) {
+            $now = $this->clock->now();
+            $this->items = array_filter($this->items, static fn (array $item): bool => $item['expires'] > $now);
+        }
 
         return true;
     }
