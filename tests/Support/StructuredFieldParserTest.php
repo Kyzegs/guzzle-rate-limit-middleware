@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kyzegs\GuzzleRateLimitMiddleware\Tests\Support;
 
 use Kyzegs\GuzzleRateLimitMiddleware\Support\StructuredFieldParser;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class StructuredFieldParserTest extends TestCase
@@ -98,9 +99,7 @@ final class StructuredFieldParserTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider malformedLists
-     */
+    #[DataProvider('malformedLists')]
     public function test_malformed_lists_return_null(string $field): void
     {
         $this->assertNull(StructuredFieldParser::parseList($field));

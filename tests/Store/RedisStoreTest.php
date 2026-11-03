@@ -9,6 +9,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Reservation;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\RedisStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RedisServer;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Predis\ClientInterface;
 use Redis;
@@ -31,9 +32,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_values_are_json_under_the_hashed_key_with_the_given_ttl(callable $connect): void
     {
         $redis = $connect();
@@ -49,9 +50,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_a_non_positive_ttl_removes_the_value(callable $connect): void
     {
         $redis = $connect();
@@ -64,9 +65,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_an_unknown_bucket_hands_out_a_single_probe(callable $connect): void
     {
         $redis = $connect();
@@ -84,9 +85,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_releasing_the_probe_lets_the_next_caller_probe(callable $connect): void
     {
         $redis = $connect();
@@ -98,9 +99,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_a_lost_probe_expires_and_its_late_release_leaves_the_next_one(callable $connect): void
     {
         $redis = $connect();
@@ -123,9 +124,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_reserves_the_remaining_slots_then_waits_for_the_reset(callable $connect): void
     {
         $redis = $connect();
@@ -148,9 +149,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_a_window_that_has_passed_is_probed_even_with_remaining_left(callable $connect): void
     {
         $redis = $connect();
@@ -162,9 +163,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_persisting_the_probe_response_opens_the_bucket_to_waiters(callable $connect): void
     {
         $redis = $connect();
@@ -180,9 +181,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_unreadable_state_is_treated_as_unknown(callable $connect): void
     {
         $redis = $connect();
@@ -195,9 +196,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_an_unmetered_route_is_reserved_without_a_probe(callable $connect): void
     {
         $redis = $connect();
@@ -210,9 +211,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_merge_does_not_hand_back_a_reservation_made_since_the_response_was_sent(callable $connect): void
     {
         $redis = $connect();
@@ -231,9 +232,9 @@ final class RedisStoreTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_merge_takes_a_new_window_as_reported(callable $connect): void
     {
         $redis = $connect();

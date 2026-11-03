@@ -14,6 +14,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\ArrayCache;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RedisServer;
 use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use ReflectionProperty;
 
@@ -72,9 +73,9 @@ final class StoreTest extends TestCase
     }
 
     /**
-     * @dataProvider storeProvider
      * @param callable(FakeClock): StoreInterface $factory
      */
+    #[DataProvider('storeProvider')]
     public function test_put_get_forget(callable $factory): void
     {
         $store = $factory(new FakeClock());
@@ -89,9 +90,9 @@ final class StoreTest extends TestCase
     }
 
     /**
-     * @dataProvider storeProvider
      * @param callable(FakeClock): StoreInterface $factory
      */
+    #[DataProvider('storeProvider')]
     public function test_round_trips_rate_limit_state_per_key(callable $factory): void
     {
         $store = $factory(new FakeClock());

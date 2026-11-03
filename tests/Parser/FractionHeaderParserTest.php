@@ -9,6 +9,7 @@ use InvalidArgumentException;
 use Kyzegs\GuzzleRateLimitMiddleware\Parser\FractionHeaderParser;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class FractionHeaderParserTest extends TestCase
@@ -92,9 +93,7 @@ final class FractionHeaderParserTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider invalidValues
-     */
+    #[DataProvider('invalidValues')]
     public function test_invalid_values_return_null(string $value): void
     {
         $this->assertNull($this->parse($value));

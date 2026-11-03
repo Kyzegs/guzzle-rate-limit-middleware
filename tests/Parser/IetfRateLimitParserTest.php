@@ -10,6 +10,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Parser\HeaderRateLimitParser;
 use Kyzegs\GuzzleRateLimitMiddleware\Parser\IetfRateLimitParser;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class IetfRateLimitParserTest extends TestCase
@@ -153,9 +154,7 @@ final class IetfRateLimitParserTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider malformedFields
-     */
+    #[DataProvider('malformedFields')]
     public function test_malformed_field_returns_null(string $field): void
     {
         $this->assertNull($this->parse(['RateLimit' => $field]));

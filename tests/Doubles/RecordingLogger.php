@@ -17,9 +17,12 @@ final class RecordingLogger extends AbstractLogger
     public array $records = [];
 
     /**
-     * @param array<mixed> $context
+     * Without a type on $message so this loads against every supported psr/log major.
+     *
+     * @param string|Stringable $message
+     * @param array<mixed>      $context
      */
-    public function log($level, string|Stringable $message, array $context = []): void
+    public function log($level, $message, array $context = []): void
     {
         $this->records[] = [
             'level' => $level,

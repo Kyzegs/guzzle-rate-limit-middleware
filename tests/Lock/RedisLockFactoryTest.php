@@ -7,6 +7,7 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Tests\Lock;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\LockTimeoutException;
 use Kyzegs\GuzzleRateLimitMiddleware\Lock\RedisLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RedisServer;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Predis\ClientInterface;
 use Redis;
@@ -27,9 +28,9 @@ final class RedisLockFactoryTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_a_held_lock_is_exclusive_until_released(callable $connect): void
     {
         $redis = $connect();
@@ -57,9 +58,9 @@ final class RedisLockFactoryTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_timeout_reports_the_key_and_the_timeout(callable $connect): void
     {
         $redis = $connect();
@@ -83,9 +84,9 @@ final class RedisLockFactoryTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_a_waiter_gets_the_lock_once_it_expires(callable $connect): void
     {
         $redis = $connect();
@@ -101,9 +102,9 @@ final class RedisLockFactoryTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_an_expired_holder_never_releases_the_lock_someone_else_took(callable $connect): void
     {
         $redis = $connect();
@@ -126,9 +127,9 @@ final class RedisLockFactoryTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_release_is_safe_without_acquire_and_when_repeated(callable $connect): void
     {
         $redis = $connect();

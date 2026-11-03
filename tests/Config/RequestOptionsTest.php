@@ -7,6 +7,7 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Tests\Config;
 use InvalidArgumentException;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\RequestOptions;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class RequestOptionsTest extends TestCase
@@ -85,9 +86,7 @@ final class RequestOptionsTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider invalidOptions
-     */
+    #[DataProvider('invalidOptions')]
     public function test_rejects_invalid_values(mixed $value, string $message): void
     {
         $this->expectException(InvalidArgumentException::class);

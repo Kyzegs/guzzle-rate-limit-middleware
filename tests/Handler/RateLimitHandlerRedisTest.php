@@ -21,6 +21,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RedisServer;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\StoppedSleeping;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\StoppingSleeper;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Predis\ClientInterface;
 use Psr\Http\Message\ResponseInterface;
@@ -58,9 +59,9 @@ final class RateLimitHandlerRedisTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_reserved_slots_count_down_without_a_bucket_lock(callable $connect): void
     {
         $store = $this->store($connect);
@@ -89,9 +90,9 @@ final class RateLimitHandlerRedisTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_other_callers_wait_for_an_in_flight_probe(callable $connect): void
     {
         $store = $this->store($connect);
@@ -132,9 +133,9 @@ final class RateLimitHandlerRedisTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_a_failed_probe_lets_the_next_caller_probe_at_once(callable $connect): void
     {
         $store = $this->store($connect);
@@ -161,9 +162,9 @@ final class RateLimitHandlerRedisTest extends TestCase
     }
 
     /**
-     * @dataProvider clients
      * @param callable(): (Redis|ClientInterface) $connect
      */
+    #[DataProvider('clients')]
     public function test_the_global_budget_still_goes_through_the_lock_factory(callable $connect): void
     {
         $store = $this->store($connect);
