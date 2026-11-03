@@ -29,9 +29,9 @@ final class HeaderParser
     /**
      * Read a Retry-After style header as seconds from $now (never negative).
      *
-     * RFC 9110 allows either delay-seconds or an HTTP-date; casting a date to
-     * a number silently turned it into "retry immediately". Returns null when
-     * the header is absent or unparseable.
+     * RFC 9110 allows either delay-seconds or an HTTP-date, and reset headers
+     * also come as ISO-8601; casting a date to a number silently turned it into
+     * "retry immediately". Returns null when the header is absent or unparseable.
      *
      * @internal
      */
@@ -44,7 +44,13 @@ final class HeaderParser
 
         $value = trim((string) $value);
         if (is_numeric($value)) {
-            return max(0.0, (float) $value);
+            return is_finite((float) $value) ? max(0.0, (float) $value) : null;
+        }
+
+        // Every date format in use has a four-digit year or a time of day.
+        // Without one the parser would still accept "6m0s" or "tomorrow".
+        if (preg_match('/\d{4}|\d:\d{2}/', $value) !== 1) {
+            return null;
         }
 
         try {

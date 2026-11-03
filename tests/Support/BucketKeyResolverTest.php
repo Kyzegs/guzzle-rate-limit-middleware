@@ -6,7 +6,7 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Tests\Support;
 
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\BucketKeyResolver;
-use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\FakeClock;
+use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use PHPUnit\Framework\TestCase;
 
 final class BucketKeyResolverTest extends TestCase

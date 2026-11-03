@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kyzegs\GuzzleRateLimitMiddleware;
 
+use DateTimeImmutable;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\HeaderParser;
@@ -18,6 +19,12 @@ use Psr\Http\Message\ResponseInterface;
  */
 final class RateLimit
 {
+    /**
+     * Responses whose reset instants differ by less than this describe the same
+     * window; the gap is network jitter, where a new window moves it by far more.
+     */
+    public const SAME_WINDOW_SECONDS = 0.5;
+
     /**
      * @param int        $limit      Total requests allowed in the window.
      * @param int        $remaining  Requests left in the current window.
@@ -104,20 +111,38 @@ final class RateLimit
     }
 
     /**
+     * The reset instant (UTC) for display and scheduling, or null when the
+     * response carried no usable reset header.
+     */
+    public function resetsAt(): ?DateTimeImmutable
+    {
+        if ($this->reset <= 0.0) {
+            return null;
+        }
+
+        return DateTimeImmutable::createFromFormat('U.u', sprintf('%.6F', $this->reset)) ?: null;
+    }
+
+    /**
      * Resolve the absolute reset timestamp from whichever headers are present,
      * in order of accuracy: relative reset-after, then absolute/relative reset,
      * then retry-after. Returns 0.0 when nothing usable is found.
      */
     private static function resolveReset(ResponseInterface $response, Headers $headers, float $now): float
     {
-        $resetAfter = HeaderParser::value($response, $headers->resetAfter);
+        $resetAfter = HeaderParser::delay($response, $headers->resetAfter, $now);
         if ($resetAfter !== null) {
-            return $now + (float) $resetAfter;
+            return $now + $resetAfter;
         }
 
         $reset = HeaderParser::value($response, $headers->reset);
-        if ($reset !== null) {
+        if (is_numeric($reset) && is_finite((float) $reset)) {
             return self::normaliseTimestamp((float) $reset, $now);
+        }
+
+        $resetDate = HeaderParser::delay($response, $headers->reset, $now);
+        if ($resetDate !== null) {
+            return $now + $resetDate;
         }
 
         $retryAfter = HeaderParser::delay($response, $headers->retryAfter, $now);
@@ -130,10 +155,16 @@ final class RateLimit
 
     /**
      * Treat values below the year-2000 epoch as relative seconds, otherwise as
-     * an absolute UNIX timestamp.
+     * an absolute UNIX timestamp, in seconds or, from 1e11 up, milliseconds.
+     * 1e11 seconds is the year 5138, while 1e11 milliseconds is back in 1973,
+     * so the two ranges cannot be confused for any real reset.
      */
     private static function normaliseTimestamp(float $value, float $now): float
     {
+        if ($value >= 1e11) {
+            return $value / 1000.0;
+        }
+
         return $value < 946684800.0 ? $now + $value : $value;
     }
 }

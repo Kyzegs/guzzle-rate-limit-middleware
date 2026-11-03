@@ -12,13 +12,14 @@ use Psr\SimpleCache\CacheInterface;
  * cross-process state via Redis, Memcached, Laravel's cache, Symfony's cache,
  * etc. — wrap their PSR-16 implementation here.
  *
- * Keys are hashed/prefixed so they are always valid PSR-16 cache keys.
+ * Keys are hashed so they are always valid PSR-16 cache keys, as long as a
+ * custom prefix stays clear of the characters PSR-16 reserves: {}()/\@:
  */
 final class Psr16Store implements StoreInterface
 {
     public function __construct(
         private readonly CacheInterface $cache,
-        private readonly string $prefix = 'grl:',
+        private readonly string $prefix = 'grl_',
     ) {
     }
 
