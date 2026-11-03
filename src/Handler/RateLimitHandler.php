@@ -676,16 +676,15 @@ final class RateLimitHandler implements InspectableHandlerInterface
         $global = $this->isGlobal($response);
 
         $this->logger->warning(sprintf(
-            'Received %d for %s %s%s. Retry %s in %.2fs.',
+            'Received %d for %s%s. Retry %s in %.2fs.',
             $response->getStatusCode(),
-            $request->getMethod(),
-            (string) $request->getUri(),
+            $this->resolver->resolve($request),
             $global ? ' (global rate limit)' : '',
             $limit === null ? (string) $tries : $tries . '/' . $limit,
             $delay,
         ), [
-            // The URI is already in the message; keeping it out of the
-            // context stops it spreading into indexed log fields.
+            // Never the URI: webhook and interaction URLs carry tokens, and any
+            // API can take a key in the query string.
             'method' => $request->getMethod(),
             'status' => $response->getStatusCode(),
             'attempt' => $tries,
@@ -717,7 +716,7 @@ final class RateLimitHandler implements InspectableHandlerInterface
 
         $this->dispatch(new RateLimitExceeded($request, $response, $retryAfter, $global));
 
-        throw new RateLimitExceededException($request, $response, $retryAfter, $global);
+        throw new RateLimitExceededException($request, $response, $retryAfter, $global, $this->resolver->resolve($request));
     }
 
     /**

@@ -12,6 +12,11 @@ use RuntimeException;
  * Thrown when a request keeps receiving rate-limited responses (a 429 by
  * default; see RetryStrategyInterface::isRateLimited()) after the retries have
  * been exhausted (and Options::$throwOnRateLimit is true).
+ *
+ * The message names the route, not the URI, because URIs can carry credentials
+ * (Discord webhook and interaction tokens, API keys in a query string) and
+ * exception messages end up in logs and error trackers. getRequest() still has
+ * the whole URI, so treat it as sensitive.
  */
 final class RateLimitExceededException extends RuntimeException
 {
@@ -20,11 +25,11 @@ final class RateLimitExceededException extends RuntimeException
         private readonly ?ResponseInterface $response = null,
         private readonly float $retryAfter = 0.0,
         private readonly bool $global = false,
+        ?string $route = null,
     ) {
         parent::__construct(sprintf(
-            'Rate limit exceeded for %s %s. Retry after %.2f seconds.%s',
-            $request->getMethod(),
-            (string) $request->getUri(),
+            'Rate limit exceeded for %s. Retry after %.2f seconds.%s',
+            $route ?? $request->getMethod() . ' ' . $request->getUri()->getHost(),
             $retryAfter,
             $global ? ' (global rate limit)' : '',
         ));

@@ -39,6 +39,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\RecordingSleeper;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\GuardedStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\ScriptedReservationStore;
+use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\RecordingLogger;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\StubRateLimitParser;
@@ -586,6 +587,38 @@ final class RateLimitHandlerTest extends TestCase
 
         $this->assertSame([10.0, 60.0], $sleeper->sleeps);
         $this->assertEqualsWithDelta(1_070.0, $sentAt, 0.001);
+    }
+
+    public function test_webhook_tokens_stay_out_of_logs_and_exception_messages(): void
+    {
+        $logger = new RecordingLogger();
+        $handler = new RateLimitHandler(
+            new Options(maxRetries: 1, safetyBufferSeconds: 0),
+            Headers::discord(),
+            $this->store(),
+            $logger,
+            new DiscordBucketResolver(),
+            new NullLockFactory(),
+            $this->clock,
+            $this->sleeper,
+        );
+
+        try {
+            $handler->handle(
+                $this->responder(new Response(429, ['Retry-After' => '1'])),
+                new Request('POST', 'https://discord.com/api/v10/webhooks/111/secret-token?wait=true'),
+                [],
+            )->wait();
+            $this->fail('The retries should have run out.');
+        } catch (RateLimitExceededException $e) {
+            $this->assertStringNotContainsString('secret-token', $e->getMessage());
+            $this->assertStringContainsString('{webhook_token}', $e->getMessage());
+            $this->assertStringContainsString('secret-token', (string) $e->getRequest()->getUri());
+        }
+
+        $logged = json_encode($logger->records, JSON_THROW_ON_ERROR);
+        $this->assertNotSame('[]', $logged);
+        $this->assertStringNotContainsString('secret-token', $logged);
     }
 
     public function test_lock_is_acquired_and_released(): void

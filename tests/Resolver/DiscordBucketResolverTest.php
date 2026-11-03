@@ -42,6 +42,33 @@ final class DiscordBucketResolverTest extends TestCase
         $this->assertSame('webhook_id=111:webhook_token=tok-abc', $resolver->majorParameters($request));
     }
 
+    public function test_every_emoji_on_a_message_shares_one_route(): void
+    {
+        $resolver = new DiscordBucketResolver();
+
+        $thumbsUp = $resolver->resolve(new Request('PUT', 'https://discord.com/api/v10/channels/1/messages/2/reactions/%F0%9F%91%8D/@me'));
+        $fire = $resolver->resolve(new Request('PUT', 'https://discord.com/api/v10/channels/1/messages/2/reactions/%F0%9F%94%A5/@me'));
+
+        $this->assertSame('PUT /api/v10/channels/{channel_id}/messages/{id}/reactions/{emoji}/@me', $thumbsUp);
+        $this->assertSame($thumbsUp, $fire);
+    }
+
+    public function test_interaction_tokens_stay_out_of_the_route(): void
+    {
+        $route = (new DiscordBucketResolver())->resolve(new Request('POST', 'https://discord.com/api/v10/interactions/9/secret-token/callback'));
+
+        $this->assertSame('POST /api/v10/interactions/{interaction_id}/{interaction_token}/callback', $route);
+    }
+
+    public function test_guild_template_code_is_not_a_guild(): void
+    {
+        $resolver = new DiscordBucketResolver();
+        $request = new Request('GET', 'https://discord.com/api/v10/guilds/templates/abc');
+
+        $this->assertSame('GET /api/v10/guilds/templates/{template_code}', $resolver->resolve($request));
+        $this->assertSame('', $resolver->majorParameters($request));
+    }
+
     public function test_no_major_parameters_for_top_level_routes(): void
     {
         $resolver = new DiscordBucketResolver();
