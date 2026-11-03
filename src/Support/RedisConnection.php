@@ -102,11 +102,12 @@ final class RedisConnection
     }
 
     /**
-     * phpredis answers a successful SET with true, Predis with an OK status;
-     * a SET NX that lost comes back as false or null.
+     * phpredis answers a successful SET with true (or "OK" on a connection set to
+     * OPT_REPLY_LITERAL), Predis with an OK status; a SET NX that lost comes back
+     * as false or null.
      */
     private function ok(mixed $reply): bool
     {
-        return $reply === true || ($reply instanceof Status && $reply->getPayload() === 'OK');
+        return $reply === true || $reply === 'OK' || ($reply instanceof Status && $reply->getPayload() === 'OK');
     }
 }

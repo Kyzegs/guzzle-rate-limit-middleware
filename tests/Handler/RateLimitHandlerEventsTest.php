@@ -311,7 +311,7 @@ final class RateLimitHandlerEventsTest extends TestCase
         // The message keeps its URI; the context must not copy it into indexed fields.
         $this->assertSame([[
             'level' => LogLevel::WARNING,
-            'message' => 'Received 429 for GET api.test/users/{id}. Retry 1/3 in 5.00s.',
+            'message' => 'Received 429 for GET api.test. Retry 1/3 in 5.00s.',
             'context' => [
                 'method' => 'GET',
                 'status' => 429,

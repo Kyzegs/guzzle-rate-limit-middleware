@@ -195,6 +195,21 @@ final class RedisStoreTest extends TestCase
         $this->assertTrue($store->reserve('bucket', self::NOW)->isProbe());
     }
 
+    public function test_a_phpredis_connection_replying_literally_still_counts_as_written(): void
+    {
+        $redis = RedisServer::phpredis();
+        $redis->setOption(Redis::OPT_REPLY_LITERAL, true);
+
+        try {
+            $store = new RedisStore($redis, RedisServer::prefix($redis));
+
+            $this->assertTrue($store->put('key', ['a' => 1], 60));
+            $this->assertSame(['a' => 1], $store->get('key'));
+        } finally {
+            $redis->setOption(Redis::OPT_REPLY_LITERAL, false);
+        }
+    }
+
     /**
      * @param callable(): (Redis|ClientInterface) $connect
      */

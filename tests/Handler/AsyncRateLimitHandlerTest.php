@@ -149,6 +149,22 @@ final class AsyncRateLimitHandlerTest extends TestCase
         $this->assertSame(0, $this->sleeper->count());
     }
 
+    public function test_cancelling_a_queued_request_leaves_the_one_ahead_of_it_alone(): void
+    {
+        $locks = new ExclusiveLockFactory();
+        $response = new Response(200, ['X-RateLimit-Remaining' => '5', 'X-RateLimit-Reset' => '10']);
+        $client = $this->client($this->transport($response), lockFactory: $locks);
+
+        $probe = $client->getAsync('https://api.test/users');
+        $queued = $client->getAsync('https://api.test/users');
+
+        $queued->cancel();
+
+        $this->assertSame(200, $probe->wait()->getStatusCode());
+        $this->assertSame(['send /users', 'wait /users'], $this->log, 'The cancelled request never goes out.');
+        $this->assertSame([], $locks->held);
+    }
+
     public function test_reservation_landing_during_a_probe_does_not_wait_for_the_probes_lock(): void
     {
         $locks = new ExclusiveLockFactory();

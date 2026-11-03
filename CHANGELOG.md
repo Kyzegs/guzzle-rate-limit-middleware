@@ -8,7 +8,7 @@ Nothing is required for code that uses the middleware through a Guzzle client. W
 
 - Stored bucket state is re-learned once after upgrading, because `Psr16Store`'s default prefix and Discord's route keys changed. Keep a custom `Psr16Store` prefix free of `{}()/\@:`.
 - `RateLimitHandler::handle()` always returns a promise. Code calling it directly must `->wait()`, and failures before sending reject the promise instead of being thrown.
-- Log messages and `RateLimitExceededException` name the route template instead of the URI. `getRequest()` still has the whole URI.
+- Log messages and `RateLimitExceededException` no longer contain the URI. They name the method and host, or Discord's route template; a custom resolver opts in to being named with `LoggableRouteInterface`. `getRequest()` still has the whole URI.
 - `Options`, `GlobalLimit` and `InvalidRequestLimit` throw `InvalidArgumentException` on out-of-range values instead of misbehaving at request time.
 - A `GlobalLimit` no longer exempts `/interactions/{id}/{token}/callback` by itself. `RateLimitMiddleware::discord()` still does; other configurations list such paths in `exemptPaths`.
 - `RateLimitMiddleware::github()` retries GitHub's 403 rate limits and throws once they run out; it used to return them.
@@ -28,6 +28,8 @@ Nothing is required for code that uses the middleware through a Guzzle client. W
 - GitHub's rate limits are recognised as a 403 as well as a 429; a plain 403 is still returned without a retry.
 - Record a global cooldown under the budget's lock, so a concurrent reservation can't erase it.
 - Don't retry a request whose body can't be rewound.
+- A lock timeout or store failure while recording a response no longer replaces that response with an exception, which could lead a caller to resend a request that went through. It is logged as a warning.
+- Cancelling a request queued behind another's first request to a bucket no longer cancels that other request.
 - `InMemoryStore` and `FilesystemStore` purge expired entries, so memory and disk no longer grow without limit.
 - Date old-message deletions with the injected clock in `DiscordBucketResolver`.
 
@@ -40,7 +42,7 @@ Nothing is required for code that uses the middleware through a Guzzle client. W
 - `RateLimitParserInterface` and a `parser:` argument for limits that don't fit one number per header. `IetfRateLimitParser` reads the draft's structured `RateLimit`/`RateLimit-Policy` fields in `ietf()`; `FractionHeaderParser` reads "used/limit" leaky buckets; `HostBucketResolver` keeps one bucket per host.
 - `RetryStrategyInterface` and a `retryStrategy:` argument, with `StatusCodeRetryStrategy` (the default), `ExponentialBackoffRetryStrategy` and `GitHubRetryStrategy`.
 - Client-side limits (`Options::$limits`): self-imposed fixed-window, sliding-window and token-bucket budgets for APIs that send no headers.
-- A `rate_limit` request option to override `max_delay`, `max_retries`, the bucket or the identity for one request, or bypass the middleware.
+- A `rate_limit` request option to override `max_delay`, `max_retries`, the bucket or the identity for one request, or bypass the middleware. A named bucket is shared across Discord's major parameters too.
 - Optional PSR-14 events (`RequestDelayed`, `RetryScheduled`, `RateLimitExceeded`, `RateLimitUpdated`, `InvalidRequestLimitReached`) and structured PSR-3 log context.
 - `RateLimitMiddleware::state()`, `forget()`, `globalBudget()` and `invalidRequestBudget()`, `BudgetState`, `InspectableHandlerInterface` and `RateLimit::resetsAt()`.
 - `GlobalLimit::$exemptPaths`, `GlobalLimit::discord()`, `GlobalLimit::withExemptPaths()`, `InvalidRequestLimit::$ignoredScopes` and `Options::withGlobalLimit()`.

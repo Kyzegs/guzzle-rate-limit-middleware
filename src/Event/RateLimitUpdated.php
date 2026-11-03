@@ -9,7 +9,8 @@ use Psr\Http\Message\RequestInterface;
 
 /**
  * Dispatched after the bucket state from a response has been stored: once per
- * response, including responses without rate-limit headers.
+ * response that reported any. A response without rate-limit information leaves
+ * the state alone and dispatches nothing.
  *
  * `$rateLimit` is the state as persisted, not as the response reported it:
  * when an out-of-order response claims more allowance than has already been

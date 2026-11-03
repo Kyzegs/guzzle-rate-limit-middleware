@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Kyzegs\GuzzleRateLimitMiddleware\Handler;
 
 use GuzzleHttp\Promise\Create;
+use GuzzleHttp\Promise\Is;
+use GuzzleHttp\Promise\Promise;
 use GuzzleHttp\Promise\PromiseInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\BudgetState;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\GlobalLimit;
@@ -19,6 +21,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\IdentityResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\InspectableHandlerInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryAfterResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LoggableRouteInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\MajorParameterAwareInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RateLimitParserInterface;
@@ -47,6 +50,8 @@ use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Log\LoggerInterface;
+use Exception;
+use LogicException;
 use Throwable;
 
 /**
@@ -203,7 +208,7 @@ final class RateLimitHandler implements InspectableHandlerInterface
         if ($probing !== null) {
             $resume = fn (): PromiseInterface => $this->attempt($handler, $request, $options, $overrides, $identity, $routeKey, $major, $tries);
 
-            return $probing->then($resume, $resume);
+            return $this->behind($probing)->then($resume, $resume);
         }
 
         $probe = $this->reserveBucketCapacity($request, $effectiveKey, $overrides);
@@ -221,9 +226,9 @@ final class RateLimitHandler implements InspectableHandlerInterface
 
         $recorded = $transfer->then(
             function (ResponseInterface $response) use ($routeKey, $major, $effectiveKey, $identity): array {
-                $updated = $this->persist($response, $routeKey, $major, $identity, $effectiveKey);
-                $this->recordGlobalLimit($response, $identity);
-                $this->recordInvalidRequest($response, $identity);
+                $updated = $this->bestEffort(fn (): ?array => $this->persist($response, $routeKey, $major, $identity, $effectiveKey));
+                $this->bestEffort(fn () => $this->recordGlobalLimit($response, $identity));
+                $this->bestEffort(fn () => $this->recordInvalidRequest($response, $identity));
 
                 return [$response, $updated];
             },
@@ -272,6 +277,50 @@ final class RateLimitHandler implements InspectableHandlerInterface
                 return $response;
             },
         );
+    }
+
+    /**
+     * A promise that settles along with $probing but cancels on its own. Chained
+     * on directly, cancelling a queued request would cancel the probe's transfer,
+     * which belongs to another caller.
+     */
+    private function behind(PromiseInterface $probing): PromiseInterface
+    {
+        $waiter = new Promise(static function () use ($probing): void {
+            $probing->wait(false);
+        });
+        $settle = static function () use ($waiter): void {
+            if (Is::pending($waiter)) {
+                $waiter->resolve(null);
+            }
+        };
+        $probing->then($settle, $settle);
+
+        return $waiter;
+    }
+
+    /**
+     * The API has answered by now. Failing to write that down (a lock timeout, a
+     * store outage) must not cost the caller the response, or they could resend
+     * a request that went through. A logic error is a bug and still surfaces.
+     *
+     * @template T
+     *
+     * @param callable(): T $step
+     *
+     * @return T|null
+     */
+    private function bestEffort(callable $step): mixed
+    {
+        try {
+            return $step();
+        } catch (LogicException $e) {
+            throw $e;
+        } catch (Exception $e) {
+            $this->logger->warning(sprintf('Could not record a rate-limit response: %s.', $e::class), ['exception' => $e]);
+
+            return null;
+        }
     }
 
     public function state(RequestInterface $request): ?RateLimit
@@ -330,7 +379,8 @@ final class RateLimitHandler implements InspectableHandlerInterface
         return [
             'identity' => $identity,
             'routeKey' => $identity . ':' . ($overrides->bucket ?? $this->resolver->resolve($request)),
-            'major' => $this->resolver instanceof MajorParameterAwareInterface
+            // A named bucket is one limit by definition, whatever the channel or guild.
+            'major' => $overrides?->bucket === null && $this->resolver instanceof MajorParameterAwareInterface
                 ? $this->resolver->majorParameters($request)
                 : '',
         ];
@@ -684,7 +734,7 @@ final class RateLimitHandler implements InspectableHandlerInterface
         $this->logger->warning(sprintf(
             'Received %d for %s%s. Retry %s in %.2fs.',
             $response->getStatusCode(),
-            $this->resolver->resolve($request),
+            $this->describe($request),
             $global ? ' (global rate limit)' : '',
             $limit === null ? (string) $tries : $tries . '/' . $limit,
             $delay,
@@ -722,7 +772,17 @@ final class RateLimitHandler implements InspectableHandlerInterface
 
         $this->dispatch(new RateLimitExceeded($request, $response, $retryAfter, $global));
 
-        throw new RateLimitExceededException($request, $response, $retryAfter, $global, $this->resolver->resolve($request));
+        throw new RateLimitExceededException($request, $response, $retryAfter, $global, $this->describe($request));
+    }
+
+    /**
+     * The request as logs and exception messages may name it.
+     */
+    private function describe(RequestInterface $request): string
+    {
+        return $this->resolver instanceof LoggableRouteInterface
+            ? $this->resolver->resolve($request)
+            : $request->getMethod() . ' ' . $request->getUri()->getHost();
     }
 
     /**

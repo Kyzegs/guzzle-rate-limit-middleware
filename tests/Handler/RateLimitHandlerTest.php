@@ -17,6 +17,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Config\LimitAlgorithm;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Options;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RateLimitParserInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryStrategyInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
@@ -33,6 +34,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Retry\ExponentialBackoffRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Retry\GitHubRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Retry\StatusCodeRetryStrategy;
 use Kyzegs\GuzzleRateLimitMiddleware\Store\InMemoryStore;
+use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLock;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\NullLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\DiscordRetryAfterResolver;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
@@ -44,6 +46,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyLockFactory;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\SpyStore;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\StubRateLimitParser;
 use Kyzegs\GuzzleRateLimitMiddleware\Tests\Doubles\TrackingLockFactory;
+use LogicException;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
@@ -674,6 +677,136 @@ final class RateLimitHandlerTest extends TestCase
 
         $this->assertSame(1, $sent);
         $this->assertSame(0, $this->sleeper->count());
+    }
+
+    public function test_a_token_in_any_path_stays_out_of_logs_and_exception_messages(): void
+    {
+        $logger = new RecordingLogger();
+        $handler = new RateLimitHandler(
+            new Options(maxRetries: 1, safetyBufferSeconds: 0),
+            new Headers(),
+            $this->store(),
+            $logger,
+            new DefaultBucketResolver(),
+            new NullLockFactory(),
+            $this->clock,
+            $this->sleeper,
+        );
+
+        try {
+            $handler->handle(
+                $this->responder(new Response(429, ['Retry-After' => '1'])),
+                new Request('POST', 'https://hooks.slack.com/services/T00000/B00000/SecretWebhookToken'),
+                [],
+            )->wait();
+            $this->fail('The retries should have run out.');
+        } catch (RateLimitExceededException $e) {
+            $this->assertStringContainsString('POST hooks.slack.com', $e->getMessage());
+            $this->assertStringNotContainsString('SecretWebhookToken', $e->getMessage());
+        }
+
+        $this->assertStringNotContainsString('SecretWebhookToken', json_encode($logger->records, JSON_THROW_ON_ERROR));
+    }
+
+    public function test_a_failed_write_after_the_response_does_not_lose_it(): void
+    {
+        $store = new class($this->store()) implements StoreInterface {
+            public bool $down = false;
+
+            public function __construct(private readonly StoreInterface $inner)
+            {
+            }
+
+            public function get(string $key): ?array
+            {
+                return $this->inner->get($key);
+            }
+
+            public function put(string $key, array $data, int $ttl): bool
+            {
+                if ($this->down) {
+                    throw new RuntimeException('The store is down.');
+                }
+
+                return $this->inner->put($key, $data, $ttl);
+            }
+
+            public function forget(string $key): bool
+            {
+                return $this->inner->forget($key);
+            }
+        };
+        $logger = new RecordingLogger();
+        $handler = new RateLimitHandler(
+            new Options(invalidRequestLimit: new InvalidRequestLimit()),
+            new Headers(),
+            $store,
+            $logger,
+            new DefaultBucketResolver(),
+            new NullLockFactory(),
+            $this->clock,
+            $this->sleeper,
+        );
+
+        $response = $handler->handle(
+            static function () use ($store): ResponseInterface {
+                $store->down = true;
+
+                return new Response(201, ['X-RateLimit-Remaining' => '5', 'X-RateLimit-Reset' => '10']);
+            },
+            new Request('POST', 'https://api.test/orders'),
+            [],
+        )->wait();
+
+        $this->assertSame(201, $response->getStatusCode());
+        $this->assertCount(1, $logger->records);
+        $this->assertSame('warning', $logger->records[0]['level']);
+    }
+
+    public function test_a_logic_error_while_recording_still_surfaces(): void
+    {
+        $locks = new class implements LockFactoryInterface {
+            public bool $broken = false;
+
+            public function make(string $key): LockInterface
+            {
+                if ($this->broken) {
+                    throw new LogicException('A bug in a lock factory.');
+                }
+
+                return new NullLock();
+            }
+        };
+        $handler = $this->handler($this->store(), new Options(), new Headers(), new DefaultBucketResolver(), $locks);
+        $request = new Request('GET', 'https://api.test/users');
+        $response = new Response(200, ['X-RateLimit-Remaining' => '5', 'X-RateLimit-Reset' => '10']);
+
+        // The first request probes under its own lock; the second records under a new one.
+        $handler->handle($this->responder($response), $request, [])->wait();
+
+        $this->expectException(LogicException::class);
+
+        $handler->handle(
+            static function () use ($locks, $response): ResponseInterface {
+                $locks->broken = true;
+
+                return $response;
+            },
+            $request,
+            [],
+        )->wait();
+    }
+
+    public function test_a_named_bucket_is_shared_across_discord_channels(): void
+    {
+        $handler = $this->handler($this->store(), new Options(safetyBufferSeconds: 0), Headers::discord(), new DiscordBucketResolver());
+        $spent = new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset-After' => '30']);
+        $options = ['rate_limit' => ['bucket' => 'bulk']];
+
+        $handler->handle($this->responder($spent), new Request('POST', 'https://discord.com/api/v10/channels/1/messages'), $options)->wait();
+        $handler->handle($this->responder($spent), new Request('POST', 'https://discord.com/api/v10/channels/2/messages'), $options)->wait();
+
+        $this->assertSame([30.0], $this->sleeper->sleeps);
     }
 
     public function test_lock_is_acquired_and_released(): void

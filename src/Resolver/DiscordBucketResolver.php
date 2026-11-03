@@ -6,6 +6,7 @@ namespace Kyzegs\GuzzleRateLimitMiddleware\Resolver;
 
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\ClockInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LoggableRouteInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\MajorParameterAwareInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Support\SystemClock;
 use Psr\Http\Message\RequestInterface;
@@ -23,7 +24,7 @@ use Psr\Http\Message\RequestInterface;
  *
  * @see https://discord.com/developers/docs/topics/rate-limits
  */
-final class DiscordBucketResolver implements BucketResolverInterface, MajorParameterAwareInterface
+final class DiscordBucketResolver implements BucketResolverInterface, MajorParameterAwareInterface, LoggableRouteInterface
 {
     /**
      * Map of the path keyword to the major-parameter name(s) of the segment(s)

@@ -85,9 +85,12 @@ $middleware = RateLimitMiddleware::discord(options: new Options(
 ```
 
 Raw authorization, webhook and interaction tokens never appear in persisted
-bucket or lock keys, log messages or exception messages, which name the route
-template instead. `RateLimitExceededException::getRequest()` still has the whole
-URI, so treat it as sensitive. Interaction callback endpoints are excluded from Discord's bot-global
+bucket or lock keys, log messages or exception messages. Those messages name
+Discord's route template with its tokens replaced, and with any other resolver
+only the method and host, since a token in a path looks like any other word. A
+custom resolver opts in to being named with `LoggableRouteInterface`.
+`RateLimitExceededException::getRequest()` still has the whole URI, so treat it
+as sensitive. Interaction callback endpoints are excluded from Discord's bot-global
 budget; the preset adds that exemption to any `GlobalLimit` you pass, so the
 example above keeps it (`GlobalLimit::discord()` spells it out). Shared-scope
 429 responses do not consume the invalid-request budget
@@ -172,8 +175,8 @@ the others poll briefly until its response lands. That caller's claim expires
 after 10 seconds (`probeTtlSeconds`), so a worker that dies mid-request can't
 stall the bucket.
 
-The global and invalid-request budgets (see the Discord preset) still go
-through the lock factory. `RedisLockFactory` covers them: `SET NX` locks with
+The global and invalid-request budgets (see the Discord preset) and client-side
+limits still go through the lock factory. `RedisLockFactory` covers them: `SET NX` locks with
 a random token, a TTL (30 seconds by default) for holders that die, an optional
 acquire timeout that throws `LockTimeoutException`, and a release that never
 frees a lock someone else has taken over since.
@@ -530,9 +533,9 @@ $middleware = RateLimitMiddleware::create(
 ```
 
 `RedisLockFactory` does the same over a Redis connection you already have.
-With `RedisStore` buckets need no lock at all, since the store reserves and
-records capacity atomically; the lock factory is then only used for the global
-and invalid-request budgets.
+With `RedisStore` buckets need no lock across a request, since the store reserves
+and records capacity atomically; the lock factory is then only held briefly, for
+bookkeeping such as the global and invalid-request budgets and client-side limits.
 
 For anything else, implement `LockFactoryInterface`/`LockInterface`.
 
@@ -582,6 +585,9 @@ time is up, and without an event loop there is nothing to schedule that on.
 Within one process, requests to a bucket whose allowance is still unknown wait
 for the first response to reveal it, then go out together. Rate-limit errors
 reject the returned promise instead of being thrown from `getAsync()`.
+
+A lock timeout or store failure while recording a response is logged as a warning
+and the response is still returned, so a request that went through isn't resent.
 
 If several processes make async requests and share a blocking lock, set a lock
 `timeoutSeconds`. A process waiting on a lock can't finish its own transfers, so

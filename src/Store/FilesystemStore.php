@@ -92,7 +92,7 @@ final class FilesystemStore implements StoreInterface
             return false;
         }
 
-        if (! @rename($temp, $path)) {
+        if (! $this->replace($temp, $path)) {
             @unlink($temp);
 
             return false;
@@ -117,23 +117,41 @@ final class FilesystemStore implements StoreInterface
     }
 
     /**
+     * Windows refuses to replace a file another process has open, which a
+     * concurrent read does for a moment, so give that a few chances to pass.
+     */
+    private function replace(string $temp, string $path): bool
+    {
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            if (@rename($temp, $path)) {
+                return true;
+            }
+
+            usleep(1000);
+        }
+
+        return false;
+    }
+
+    /**
      * Racing a writer can at worst delete a value just refreshed, which only
      * means relearning that bucket. Temp files have no expiry of their own; one
      * still here an hour on belongs to a process that died mid-write.
      */
     private function sweep(): void
     {
-        foreach (glob($this->directory . '/*.json') ?: [] as $file) {
-            $contents = @file_get_contents($file);
-            $payload = $contents === false ? null : json_decode($contents, true);
+        // scandir, as glob would read brackets in the directory's name as a pattern.
+        foreach (scandir($this->directory) ?: [] as $name) {
+            $file = $this->directory . '/' . $name;
 
-            if (is_array($payload) && is_numeric($payload['expires'] ?? null) && $payload['expires'] <= $this->clock->now()) {
-                @unlink($file);
-            }
-        }
+            if (str_ends_with($name, '.json')) {
+                $contents = @file_get_contents($file);
+                $payload = $contents === false ? null : json_decode($contents, true);
 
-        foreach (glob($this->directory . '/*.tmp') ?: [] as $file) {
-            if (@filemtime($file) < time() - 3600) {
+                if (is_array($payload) && is_numeric($payload['expires'] ?? null) && $payload['expires'] <= $this->clock->now()) {
+                    @unlink($file);
+                }
+            } elseif (str_ends_with($name, '.tmp') && @filemtime($file) < time() - 3600) {
                 @unlink($file);
             }
         }

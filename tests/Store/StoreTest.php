@@ -151,6 +151,23 @@ final class StoreTest extends TestCase
         $this->assertNotNull($store->get('fresh'));
     }
 
+    public function test_filesystem_store_purges_a_directory_with_glob_characters_in_its_name(): void
+    {
+        $dir = sys_get_temp_dir() . '/grl[1]-' . bin2hex(random_bytes(6));
+        $clock = new FakeClock(1_000.0);
+        $store = new FilesystemStore($dir, $clock, sweepEvery: 1);
+
+        $store->put('old', ['a' => 1], 10);
+        $clock->advance(11);
+        $store->put('fresh', ['a' => 1], 100);
+
+        $names = array_values(array_diff(scandir($dir) ?: [], ['.', '..']));
+        array_map(static fn (string $name): bool => unlink($dir . '/' . $name), $names);
+        rmdir($dir);
+
+        $this->assertCount(1, $names);
+    }
+
     public function test_filesystem_store_ignores_a_tampered_file(): void
     {
         $store = new FilesystemStore($this->tempDir, new FakeClock());
