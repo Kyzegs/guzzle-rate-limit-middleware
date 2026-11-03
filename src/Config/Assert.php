@@ -24,7 +24,7 @@ final class Assert
 
     public static function positive(string $name, int|float $value): void
     {
-        if (is_nan((float) $value) || $value <= 0) {
+        if (! is_finite((float) $value) || $value <= 0) {
             throw new InvalidArgumentException(sprintf('%s must be greater than 0, got %s.', $name, is_nan((float) $value) ? 'NAN' : $value));
         }
     }
