@@ -35,7 +35,7 @@ jobs:
             guzzle: ''
           - php: '8.5'
             dependencies: highest
-            guzzle: '^7.10'
+            guzzle: '^7.15.2'
     steps:
       - uses: actions/checkout@v4
 

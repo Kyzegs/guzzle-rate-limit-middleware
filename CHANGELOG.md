@@ -12,7 +12,7 @@ Nothing is required for code that uses the middleware through a Guzzle client. W
 - `Options`, `GlobalLimit` and `InvalidRequestLimit` throw `InvalidArgumentException` on out-of-range values instead of misbehaving at request time.
 - A `GlobalLimit` no longer exempts `/interactions/{id}/{token}/callback` by itself. `RateLimitMiddleware::discord()` still does; other configurations list such paths in `exemptPaths`.
 - `RateLimitMiddleware::github()` retries GitHub's 403 rate limits and throws once they run out; it used to return them.
-- Requires `psr/event-dispatcher` (interfaces only).
+- Requires `psr/event-dispatcher` (interfaces only), and Guzzle 7.15.2 or 8.0.1 at least, since earlier versions have published security advisories (cookie disclosure and host-check bypasses among them).
 
 ### Security
 

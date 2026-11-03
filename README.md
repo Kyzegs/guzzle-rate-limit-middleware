@@ -25,7 +25,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 composer require kyzegs/guzzle-rate-limit-middleware
 ```
 
-Requires PHP 8.2+ and Guzzle 7.10+ or 8.
+Requires PHP 8.2+ and Guzzle 7.15.2+ or 8.0.1+.
 
 ## Quick start
 
