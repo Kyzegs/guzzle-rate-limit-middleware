@@ -1,9 +1,57 @@
 # Changelog
 
-## Unreleased
+## 1.3.0
 
-- Run the test suite on PHP 8.2-8.4 (plus lowest dependencies) and PHPStan in GitHub Actions.
-- Require PHPUnit 10.1 or later for development; `phpunit.xml.dist` uses the `<source>` element, which 10.0 rejects.
+### Upgrading
+
+Nothing is required for code that uses the middleware through a Guzzle client. Worth checking:
+
+- Stored bucket state is re-learned once after upgrading, because `Psr16Store`'s default prefix and Discord's route keys changed. Keep a custom `Psr16Store` prefix free of `{}()/\@:`.
+- `RateLimitHandler::handle()` always returns a promise. Code calling it directly must `->wait()`, and failures before sending reject the promise instead of being thrown.
+- Log messages and `RateLimitExceededException` name the route template instead of the URI. `getRequest()` still has the whole URI.
+- `Options`, `GlobalLimit` and `InvalidRequestLimit` throw `InvalidArgumentException` on out-of-range values instead of misbehaving at request time.
+- A `GlobalLimit` no longer exempts `/interactions/{id}/{token}/callback` by itself. `RateLimitMiddleware::discord()` still does; other configurations list such paths in `exemptPaths`.
+- `RateLimitMiddleware::github()` retries GitHub's 403 rate limits and throws once they run out; it used to return them.
+- Requires `psr/event-dispatcher` (interfaces only).
+
+### Security
+
+- Keep webhook and interaction tokens, and anything else in a URI, out of log messages and `RateLimitExceededException` messages.
+
+### Fixed
+
+- Stop throwing from the middleware instead of rejecting, which hid connection failures from an outer `Middleware::retry` and kept `Pool` sequential. `getAsync()`, `Pool` and `Promise\Utils::all()` now keep their transfers concurrent; waiting for an exhausted bucket, a spent budget or a retry delay still blocks.
+- `Psr16Store`'s default prefix used a character PSR-16 reserves, so strict caches such as Symfony's rejected every key.
+- A waiter that slept out a window no longer sends straight into a new window another worker has already spent.
+- Read reset headers in every format in use. An epoch in milliseconds used to mean a sleep of tens of thousands of years, ISO-8601 read as its year in seconds, and an HTTP-date as no wait.
+- Discord: all emoji on a message share one reaction route, and `/guilds/templates/{code}` no longer reads `templates` as a guild id.
+- GitHub's rate limits are recognised as a 403 as well as a 429; a plain 403 is still returned without a retry.
+- Record a global cooldown under the budget's lock, so a concurrent reservation can't erase it.
+- Don't retry a request whose body can't be rewound.
+- `InMemoryStore` and `FilesystemStore` purge expired entries, so memory and disk no longer grow without limit.
+- Date old-message deletions with the injected clock in `DiscordBucketResolver`.
+
+### Added
+
+- Support Guzzle 8, and `psr/log` and `psr/simple-cache` 1.x and 2.x.
+- Presets for GitLab, Twitch, Reddit and Shopify, and `Headers` factories for the first three.
+- `RedisStore` (phpredis or Predis), which reserves and records bucket capacity in atomic Lua scripts so buckets need no lock across processes; `AtomicReservationStoreInterface`; `Reservation`.
+- `FlockLockFactory` for one host, `SymfonyLockFactory` and `RedisLockFactory` across hosts, with optional acquire timeouts that throw `LockTimeoutException`.
+- `RateLimitParserInterface` and a `parser:` argument for limits that don't fit one number per header. `IetfRateLimitParser` reads the draft's structured `RateLimit`/`RateLimit-Policy` fields in `ietf()`; `FractionHeaderParser` reads "used/limit" leaky buckets; `HostBucketResolver` keeps one bucket per host.
+- `RetryStrategyInterface` and a `retryStrategy:` argument, with `StatusCodeRetryStrategy` (the default), `ExponentialBackoffRetryStrategy` and `GitHubRetryStrategy`.
+- Client-side limits (`Options::$limits`): self-imposed fixed-window, sliding-window and token-bucket budgets for APIs that send no headers.
+- A `rate_limit` request option to override `max_delay`, `max_retries`, the bucket or the identity for one request, or bypass the middleware.
+- Optional PSR-14 events (`RequestDelayed`, `RetryScheduled`, `RateLimitExceeded`, `RateLimitUpdated`, `InvalidRequestLimitReached`) and structured PSR-3 log context.
+- `RateLimitMiddleware::state()`, `forget()`, `globalBudget()` and `invalidRequestBudget()`, `BudgetState`, `InspectableHandlerInterface` and `RateLimit::resetsAt()`.
+- `GlobalLimit::$exemptPaths`, `GlobalLimit::discord()`, `GlobalLimit::withExemptPaths()`, `InvalidRequestLimit::$ignoredScopes` and `Options::withGlobalLimit()`.
+- PSR-20 clocks as `clock:`, and `Psr20Clock` wherever a `ClockInterface` is expected.
+- `Testing\FakeClock` and `Testing\RecordingSleeper`, for asserting delays in your own tests.
+- Every preset takes the same optional store, logger, lock factory, options and events.
+
+### Internal
+
+- CI on PHP 8.2-8.5, Linux, Windows and macOS, Guzzle 7 and 8, lowest dependencies, PHPStan 2 and a dependency audit.
+- PHPUnit 11. Tests, examples and tooling config no longer ship in the Composer package.
 
 ## 1.2.1
 
@@ -15,41 +63,6 @@
 - Key GitHub state by `X-RateLimit-Resource` in `Headers::github()`, so endpoints that share GitHub's `core` (or `search`, `graphql`, …) allowance no longer each believe they have the whole remaining count.
 - Scope discovered buckets to the request identity. Two tokens that share a bucket hash (e.g. two Discord bots on the same channel route) no longer share, and exhaust, each other's allowance. Existing bucket state is re-learned after upgrading.
 - Record a response's bucket state under the bucket's lock. The merge with the stored window ran unlocked, so a reservation made by another worker in between could be overwritten and its spent slot handed back.
-- Run static analysis on PHPStan 2.
-- Ship `Testing\FakeClock` and `Testing\RecordingSleeper` so applications can assert rate-limit delays in their own tests without real waits.
-- Validate `Options`, `GlobalLimit` and `InvalidRequestLimit` on construction. Out-of-range values (negative retries or delays, jitter outside 0-100, empty windows, non-HTTP status codes) now throw `InvalidArgumentException` instead of misbehaving at request time.
-- Accept a PSR-20 clock as the middleware `clock:`, and add `Psr20Clock` to adapt one wherever a `ClockInterface` is expected.
-- Add GitLab, Twitch and Reddit presets: `RateLimitMiddleware::gitlab()`, `::twitch()` and `::reddit()`, with matching `Headers` factories.
-- Add `FlockLockFactory`, a dependency-free `flock()` lock for workers on one host and the natural partner of `FilesystemStore`.
-- Add `SymfonyLockFactory`, an adapter over symfony/lock for locking across hosts (Redis, PDO, …), with a TTL so a crashed worker's lock expires.
-- Both take an optional acquire timeout and throw the new `LockTimeoutException` once it passes.
-- Stop waiting on the inner handler's promise. Bookkeeping and `429` retries are chained onto it, so `getAsync()`, `Pool` and `Promise\Utils::all()` keep their transfers concurrent. Waiting for an exhausted bucket, a spent global budget or a retry delay still blocks.
-- `RateLimitHandler::handle()` always returns a promise. Failures before sending (such as `InvalidRequestLimitExceededException`) reject it instead of being thrown.
-- Queue concurrent requests from one process to a bucket with an unknown allowance behind the first response, instead of blocking on the lock that request holds. The lock is also released when that request is cancelled.
-- Add `GlobalLimit::$exemptPaths`, path patterns that bypass the global budget, with `GlobalLimit::discord()` and `GlobalLimit::withExemptPaths()`.
-- Stop exempting `/interactions/{id}/{token}/callback` from every global limit. This is a behaviour change for non-Discord configurations, which now count those paths unless they list them in `exemptPaths`; `RateLimitMiddleware::discord()` still exempts interaction callbacks, including for a custom `GlobalLimit`.
-- Add `InvalidRequestLimit::$ignoredScopes`, the scope values whose 429s don't count against the invalid-request budget (default `['shared']`, as before).
-- Date messages for Discord's old-message deletion bucket with the injected clock: `DiscordBucketResolver` accepts a clock, and `RateLimitMiddleware::discord()` takes a `clock` it shares with the resolver.
-- Add `Options::withGlobalLimit()`.
-- Add pluggable retry strategies: pass a `RetryStrategyInterface` as `retryStrategy:` to decide what is retried, how long to wait, and what throws `RateLimitExceededException`. The default `StatusCodeRetryStrategy` keeps the existing behaviour.
-- Add `ExponentialBackoffRetryStrategy`, which backs off with full jitter when a retried response doesn't say how long to wait.
-- Add `GitHubRetryStrategy` and use it in `RateLimitMiddleware::github()`: primary and secondary rate limits are retried whether they come as a 403 or a 429, plain 403s are not, and exhausted 403 rate limits throw.
-- Add `RateLimitParserInterface` and a `parser:` option, for APIs whose rate limit doesn't fit one number per header. A parser returning `null` leaves the stored state untouched.
-- Read the IETF draft's structured `RateLimit`/`RateLimit-Policy` fields (current list form and older dictionary form) in `RateLimitMiddleware::ietf()`, tracking the policy that runs out first. The separate `RateLimit-*` headers still work.
-- Add `FractionHeaderParser` for "used/limit" leaky-bucket headers, `HostBucketResolver`, and a `RateLimitMiddleware::shopify()` preset.
-- Add client-side limits (`Options::$limits`): self-imposed fixed-window, sliding-window and token-bucket budgets, scoped per identity, host, route or everything and optionally filtered per request, for APIs that document limits without sending headers.
-- A request waits until every applicable limit has room and consumes from none of them while it waits.
-- Add a `rate_limit` request option to override `max_delay`, `max_retries`, the bucket or the identity for a single request, or bypass the middleware with `enabled: false`. Invalid values throw `InvalidArgumentException`.
-- Add optional PSR-14 events (`RequestDelayed`, `RetryScheduled`, `RateLimitExceeded`, `RateLimitUpdated`, `InvalidRequestLimitReached`) through a new `events` argument on the middleware, its presets and `RateLimitHandler`.
-- Add structured PSR-3 context to log records, and a debug record when the global budget delays a request.
-- Require `psr/event-dispatcher` (interfaces only).
-- Add `RateLimitMiddleware::state()` and `forget()` to read or drop the stored state of the bucket a request would use.
-- Add `RateLimitMiddleware::globalBudget()` and `invalidRequestBudget()`, returning a `BudgetState` for the configured self-imposed budgets.
-- Add `InspectableHandlerInterface`, which custom handlers can implement to support inspection.
-- Add `RateLimit::resetsAt()`.
-- Add `RedisStore` (phpredis or Predis), which reserves bucket capacity in a single atomic Lua script, so buckets need no lock across processes and none is held while a request is in flight.
-- Add `AtomicReservationStoreInterface`, which the handler uses in place of the bucket lock when a store implements it.
-- Add `RedisLockFactory`: token-checked Redis locks with a TTL and an optional acquire timeout that throws `LockTimeoutException`.
 
 ## 1.2.0
 

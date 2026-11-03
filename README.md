@@ -25,7 +25,7 @@ State is persisted through a pluggable store, so rate limiting works **across se
 composer require kyzegs/guzzle-rate-limit-middleware
 ```
 
-Requires PHP 8.2+ and Guzzle 7.10+.
+Requires PHP 8.2+ and Guzzle 7.10+ or 8.
 
 ## Quick start
 
@@ -84,12 +84,33 @@ $middleware = RateLimitMiddleware::discord(options: new Options(
 ));
 ```
 
-Raw authorization and webhook tokens never appear in persisted bucket or lock
-keys. Interaction callback endpoints are excluded from Discord's bot-global
+Raw authorization, webhook and interaction tokens never appear in persisted
+bucket or lock keys, log messages or exception messages, which name the route
+template instead. `RateLimitExceededException::getRequest()` still has the whole
+URI, so treat it as sensitive. Interaction callback endpoints are excluded from Discord's bot-global
 budget; the preset adds that exemption to any `GlobalLimit` you pass, so the
 example above keeps it (`GlobalLimit::discord()` spells it out). Shared-scope
 429 responses do not consume the invalid-request budget
 (`InvalidRequestLimit::$ignoredScopes`, default `['shared']`).
+
+## Supported APIs and runtimes
+
+| API sends | Examples | Use |
+|-----------|----------|-----|
+| A preset's headers | Discord, GitHub, GitLab, Twitch, Reddit, Twitter/X, Shopify | That preset |
+| `X-RateLimit-*` | Many REST APIs | `new RateLimitMiddleware()` |
+| `RateLimit` / `RateLimit-Policy`, or `RateLimit-*` | The IETF draft, in any of its forms | `RateLimitMiddleware::ietf()` |
+| Other names, one number per header | Sentry, Okta, Zendesk | [Custom headers](#custom-headers) |
+| One field holding several values | `used/limit` and the like | [Custom parsers](#custom-parsers) |
+| Only `429` with `Retry-After` | Slack, Microsoft Graph | The default: nothing to pre-empt, but `429`s are retried for you |
+| Nothing | Stripe | [Client-side limits](#client-side-limits) |
+
+Reset values may be relative seconds, an epoch in seconds or milliseconds, an
+HTTP-date or ISO-8601. Duration strings such as OpenAI's `6m0s` aren't read, so
+such an API is only retried on its `429`s unless you add a parser.
+
+CI runs PHP 8.2 to 8.5 on Linux, Windows and macOS, Guzzle 7 and 8, with lowest
+and highest dependencies.
 
 ## Cross-process rate limiting
 
@@ -173,9 +194,9 @@ use Kyzegs\GuzzleRateLimitMiddleware\RateLimitMiddleware;
 $headers = new Headers(
     limit:      'X-API-Limit',
     remaining:  'X-API-Remaining',
-    reset:      'X-API-Reset',        // absolute timestamp OR relative seconds
+    reset:      'X-API-Reset',        // relative seconds, epoch (s or ms), HTTP-date or ISO-8601
     resetAfter: null,                 // relative seconds (preferred when present)
-    retryAfter: 'Retry-After',        // used for 429 retry delays (seconds or HTTP-date)
+    retryAfter: 'Retry-After',        // used for 429 retry delays (seconds or a date)
     bucket:     null,                 // enables bucket-hash discovery when set
     global:     null,                 // "true" indicates a global rate limit
     scope:      null,                 // "global" indicates a global rate limit
@@ -184,7 +205,7 @@ $headers = new Headers(
 $middleware = RateLimitMiddleware::create(headers: $headers);
 ```
 
-`reset` values below the year-2000 epoch are treated as relative seconds; larger values as absolute UNIX timestamps.
+`reset` numbers below the year-2000 epoch are treated as relative seconds, larger ones as absolute UNIX timestamps, and from `1e11` up as timestamps in milliseconds. A value that can't be read counts as no reset.
 
 ## Custom parsers
 
@@ -246,6 +267,10 @@ $options = new Options(
     throwOnRateLimit:    true,   // throw once retries are exhausted on a rate limit (a 429 by default)
     maxStoreTtl:         604800, // upper bound for cached bucket state (seconds)
     retryStatusCodes:    [429],  // statuses that trigger a retry
+    globalLimit:         null,   // cap on all requests per credential, see below
+    invalidRequestLimit: null,   // stop before an API bans you for too many errors
+    maxDelaySeconds:     null,   // throw RateLimitDelayExceededException rather than wait longer
+    limits:              [],     // client-side budgets, see "Client-side limits"
 );
 
 $middleware = RateLimitMiddleware::create(options: $options);
@@ -416,7 +441,7 @@ $client->get('/items', ['rate_limit' => ['identity' => 'tenant-42', 'max_retries
 | `bucket` | `string` | Replaces the resolved bucket, so different routes can share one limit. Still scoped by identity. |
 | `identity` | `string` | Replaces the resolved identity (the `Authorization` fingerprint by default), e.g. with a tenant id. Fingerprinted the same way, never stored raw. |
 | `max_delay` | number or `null` | Overrides `Options::$maxDelaySeconds`. `0` throws `RateLimitDelayExceededException` instead of waiting; `null` lifts the cap. |
-| `max_retries` | `int` | Overrides `Options::$maxRetries`. |
+| `max_retries` | `int` | Overrides `Options::$maxRetries`. With a custom retry strategy it can only stop retries sooner. |
 
 Unknown keys, wrong types and negative numbers throw an `InvalidArgumentException`,
 and the option is removed before the request reaches the next handler. Set it in
@@ -523,12 +548,12 @@ don't queue behind a probe that will never learn anything.
 
 Both lock settings have to allow for that round trip:
 
-- **TTL** (`SymfonyLockFactory` only). A lock in Redis or a database outlives a
-  worker that crashes while holding it, so it expires after `ttlSeconds`
-  (default 30). Keep it above your Guzzle `timeout`: if it lapses mid-request,
+- **TTL** (`SymfonyLockFactory` and `RedisLockFactory`). A lock in Redis or a
+  database outlives a worker that crashes while holding it, so it expires after
+  `ttlSeconds` (default 30). Keep it above your Guzzle `timeout`: if it lapses mid-request,
   a second worker may probe the same bucket and draw a 429. `flock()` needs no
   TTL, since the OS releases the lock with the process.
-- **Timeout** (both factories). `acquire()` waits indefinitely by default. Pass
+- **Timeout** (all three factories). `acquire()` waits indefinitely by default. Pass
   `timeoutSeconds` to throw a
   `Kyzegs\GuzzleRateLimitMiddleware\Exception\LockTimeoutException` instead,
   and make it at least as long as your slowest request, because a waiter may
@@ -558,6 +583,12 @@ Within one process, requests to a bucket whose allowance is still unknown wait
 for the first response to reveal it, then go out together. Rate-limit errors
 reject the returned promise instead of being thrown from `getAsync()`.
 
+If several processes make async requests and share a blocking lock, set a lock
+`timeoutSeconds`. A process waiting on a lock can't finish its own transfers, so
+two processes that each hold one bucket's lock while waiting for the other's
+would otherwise wait forever. `RedisStore` needs no bucket lock and so can't get
+into this.
+
 ## Events
 
 Pass any [PSR-14](https://www.php-fig.org/psr/psr-14/) event dispatcher to
@@ -579,8 +610,8 @@ $middleware = RateLimitMiddleware::github(events: $dispatcher);
 
 | Event | Dispatched | Carries |
 |-------|------------|---------|
-| `RequestDelayed` | before sleeping for a spent bucket or global budget | `request`, `delay`, `reason` (`DelayReason::Bucket`/`GlobalLimit`), `key` |
-| `RetryScheduled` | before sleeping to retry a `429` (or other `retryStatusCodes`) | `request`, `response`, `attempt`, `maxRetries`, `delay`, `global` |
+| `RequestDelayed` | before sleeping for a spent bucket, global budget or client-side limit | `request`, `delay`, `reason` (`DelayReason::Bucket`/`GlobalLimit`/`ClientLimit`), `key` |
+| `RetryScheduled` | before sleeping to retry a `429` (or other `retryStatusCodes`) | `request`, `response`, `attempt`, `maxRetries` (`null` with a custom strategy), `delay`, `global` |
 | `RateLimitExceeded` | right before `RateLimitExceededException` is thrown | `request`, `response`, `retryAfter`, `global` |
 | `RateLimitUpdated` | after a response's bucket state is stored | `request`, `rateLimit`, `key` |
 | `InvalidRequestLimitReached` | right before `InvalidRequestLimitExceededException` is thrown | `request`, `retryAfter` |
@@ -617,7 +648,8 @@ Build the request the way the client sends it — absolute URI and the same
 `Authorization` header — since both decide the bucket. `state()` is `null`
 until a response has revealed the window, and again once it has reset.
 `forget()` drops the counters but keeps a bucket hash learned through
-discovery.
+discovery. Both look at the identity and bucket the request resolves to, so they
+don't see state kept under a `rate_limit` `identity` or `bucket` override.
 
 The self-imposed budgets are exposed the same way. `globalBudget()` and
 `invalidRequestBudget()` return a `BudgetState` for the request's identity
@@ -681,6 +713,10 @@ $middleware = RateLimitMiddleware::create(
 composer test      # PHPUnit
 composer analyse   # PHPStan (level 8)
 ```
+
+Redis-backed tests use `GRL_REDIS_HOST` and `GRL_REDIS_PORT` (`127.0.0.1:6379`
+by default) and skip themselves when nothing is listening. Runnable examples are
+in [`examples/`](examples/README.md).
 
 ## License
 

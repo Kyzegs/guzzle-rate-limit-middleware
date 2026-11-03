@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Kyzegs\GuzzleRateLimitMiddleware\Contracts;
 
 use Psr\Http\Message\RequestInterface;

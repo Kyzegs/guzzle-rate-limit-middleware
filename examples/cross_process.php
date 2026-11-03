@@ -16,8 +16,8 @@ use Kyzegs\GuzzleRateLimitMiddleware\Store\FilesystemStore;
  * of this script (a different process) will honour the limit recorded by the
  * first run and sleep before sending its request.
  *
- * Swap FilesystemStore for Psr16Store(new RedisAdapter(...)) to share state
- * across hosts.
+ * Swap FilesystemStore for RedisStore, or a Psr16Store around any PSR-16 cache,
+ * to share state across hosts.
  */
 $store = new FilesystemStore(sys_get_temp_dir() . '/grl-example');
 
