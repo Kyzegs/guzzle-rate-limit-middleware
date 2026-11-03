@@ -621,6 +621,61 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertStringNotContainsString('secret-token', $logged);
     }
 
+    public function test_global_cooldown_is_recorded_under_the_budget_lock(): void
+    {
+        $locks = new SpyLockFactory();
+        $handler = $this->handler($this->store(), new Options(
+            maxRetries: 0,
+            safetyBufferSeconds: 0,
+            throwOnRateLimit: false,
+            globalLimit: new GlobalLimit(),
+        ), Headers::discord(), new DiscordBucketResolver(), $locks);
+
+        $handler->handle(
+            $this->responder(new Response(429, ['Retry-After' => '2', 'X-RateLimit-Global' => 'true'])),
+            new Request('GET', 'https://discord.com/api/v10/users/@me', ['Authorization' => 'Bot secret']),
+            [],
+        )->wait();
+
+        $globalLocks = array_filter($locks->keys, static fn (string $key): bool => str_starts_with($key, 'global:'));
+        $this->assertCount(2, $globalLocks, 'Once to reserve, once to record the cooldown.');
+        $this->assertSame($locks->acquired, $locks->released);
+    }
+
+    public function test_global_cooldown_is_not_recorded_without_a_global_limit(): void
+    {
+        $store = $this->store();
+        $handler = $this->handler($store, new Options(maxRetries: 0, throwOnRateLimit: false));
+        $request = new Request('GET', 'https://api.test/users', ['Authorization' => 'Bot secret']);
+
+        $handler->handle($this->responder(new Response(429, ['Retry-After' => '2'], '{"global":true}')), $request, [])->wait();
+
+        $this->assertNull($store->get('global:' . hash('sha256', hash('sha256', 'Bot secret'))));
+    }
+
+    public function test_a_body_that_cannot_be_rewound_is_not_retried(): void
+    {
+        $sent = 0;
+        $handler = $this->handler($this->store(), new Options(maxRetries: 3));
+
+        try {
+            $handler->handle(
+                static function () use (&$sent): ResponseInterface {
+                    $sent++;
+
+                    return new Response(429, ['Retry-After' => '1']);
+                },
+                new Request('POST', 'https://api.test/users', [], new NoSeekStream(Utils::streamFor('payload'))),
+                [],
+            )->wait();
+            $this->fail('A rate limit that cannot be retried should still throw.');
+        } catch (RateLimitExceededException) {
+        }
+
+        $this->assertSame(1, $sent);
+        $this->assertSame(0, $this->sleeper->count());
+    }
+
     public function test_lock_is_acquired_and_released(): void
     {
         $lockFactory = new SpyLockFactory();

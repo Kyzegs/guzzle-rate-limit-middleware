@@ -643,6 +643,12 @@ final class RateLimitHandler implements InspectableHandlerInterface
      */
     private function retryDelay(RequestInterface $request, ResponseInterface $response, int $tries, RequestOptions $overrides): ?float
     {
+        // The transfer has read a stream body it can't rewind, so a retry would
+        // send it empty or fail.
+        if (! $request->getBody()->isSeekable()) {
+            return null;
+        }
+
         if ($overrides->retriesOverridden && $tries >= $overrides->maxRetries) {
             return null;
         }
@@ -817,12 +823,21 @@ final class RateLimitHandler implements InspectableHandlerInterface
 
     private function recordGlobalLimit(ResponseInterface $response, string $identity): void
     {
-        if ($response->getStatusCode() !== 429 || ! $this->isGlobal($response)) {
+        if ($this->options->globalLimit === null || $response->getStatusCode() !== 429 || ! $this->isGlobal($response)) {
             return;
         }
         $delay = $this->retryAfter($response);
         $key = $this->globalKey($identity);
-        $this->store->put($key, ['count' => PHP_INT_MAX, 'reset' => $this->clock->now() + $delay, 'blocked_until' => $this->clock->now() + $delay], (int) ceil($delay) + 1);
+        // Under the lock: a reservation that read the budget just before this
+        // would otherwise write its count back over the cooldown and erase it.
+        $lock = $this->lockFactory->make($key);
+        $lock->acquire();
+        try {
+            $until = $this->clock->now() + $delay;
+            $this->store->put($key, ['count' => PHP_INT_MAX, 'reset' => $until, 'blocked_until' => $until], (int) ceil($delay) + 1);
+        } finally {
+            $lock->release();
+        }
     }
 
     private function enforceInvalidBudget(RequestInterface $request, string $identity): void
