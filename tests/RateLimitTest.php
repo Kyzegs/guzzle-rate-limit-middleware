@@ -8,6 +8,7 @@ use GuzzleHttp\Psr7\Response;
 use Kyzegs\GuzzleRateLimitMiddleware\Config\Headers;
 use Kyzegs\GuzzleRateLimitMiddleware\RateLimit;
 use Kyzegs\GuzzleRateLimitMiddleware\Testing\FakeClock;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class RateLimitTest extends TestCase
@@ -54,6 +55,35 @@ final class RateLimitTest extends TestCase
         $rateLimit = RateLimit::fromResponse($response, new Headers(), $clock);
 
         $this->assertSame(15.0, $rateLimit->secondsUntilReset($clock));
+    }
+
+    /**
+     * @return iterable<string, array{string, float}>
+     */
+    public static function resetFormats(): iterable
+    {
+        // The clock below reads 2027-01-15T08:00:00Z.
+        yield 'epoch seconds' => ['1800000060', 60.0];
+        yield 'epoch milliseconds' => ['1800000060000', 60.0];
+        yield 'relative seconds' => ['60.5', 60.5];
+        yield 'ISO-8601' => ['2027-01-15T08:01:00Z', 60.0];
+        yield 'ISO-8601 with offset' => ['2027-01-15T09:01:00+01:00', 60.0];
+        yield 'HTTP-date' => ['Fri, 15 Jan 2027 08:01:00 GMT', 60.0];
+        yield 'date already past' => ['2027-01-15T07:00:00Z', 0.0];
+        yield 'duration nothing here reads' => ['6m0s', 0.0];
+        yield 'garbage' => ['soon', 0.0];
+        yield 'overflowing number' => ['1e999', 0.0];
+    }
+
+    #[DataProvider('resetFormats')]
+    public function test_reset_header_formats(string $value, float $expected): void
+    {
+        $clock = new FakeClock(1_800_000_000.0);
+        $response = new Response(200, ['X-RateLimit-Reset' => $value]);
+
+        $rateLimit = RateLimit::fromResponse($response, new Headers(), $clock);
+
+        $this->assertEqualsWithDelta($expected, $rateLimit->secondsUntilReset($clock), 0.001);
     }
 
     public function test_retry_after_used_when_no_reset_header(): void

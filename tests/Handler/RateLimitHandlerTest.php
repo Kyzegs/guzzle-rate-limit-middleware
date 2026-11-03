@@ -19,6 +19,7 @@ use Kyzegs\GuzzleRateLimitMiddleware\Contracts\BucketResolverInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\LockFactoryInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RateLimitParserInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\RetryStrategyInterface;
+use Kyzegs\GuzzleRateLimitMiddleware\Contracts\SleeperInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Contracts\StoreInterface;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\InvalidRequestLimitExceededException;
 use Kyzegs\GuzzleRateLimitMiddleware\Exception\RateLimitDelayExceededException;
@@ -521,6 +522,70 @@ final class RateLimitHandlerTest extends TestCase
         $this->assertCount(3, $lockFactory->keys, 'First attempt, recording its response, and the retry.');
         $this->assertNotSame($bucketKey, $lockFactory->keys[0], 'The first attempt only knows the route.');
         $this->assertSame($bucketKey, $lockFactory->keys[2], 'The retry reserves under the discovered bucket.');
+    }
+
+    public function test_waiter_does_not_send_into_a_new_exhausted_window(): void
+    {
+        $store = $this->store();
+        $request = new Request('GET', 'https://api.test/users');
+        $otherWorker = $this->handler($store, new Options(safetyBufferSeconds: 0));
+
+        $otherWorker->handle(
+            $this->responder(new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '10'])),
+            $request,
+            [],
+        )->wait();
+
+        // While this request sleeps out that window, the other worker's response
+        // opens the next one and spends it.
+        $sleeper = new class($this->clock, $otherWorker, $request) implements SleeperInterface {
+            /** @var list<float> */
+            public array $sleeps = [];
+
+            public function __construct(
+                private readonly FakeClock $clock,
+                private readonly RateLimitHandler $otherWorker,
+                private readonly RequestInterface $request,
+            ) {
+            }
+
+            public function sleep(float $seconds): void
+            {
+                $this->sleeps[] = $seconds;
+                $this->clock->advance($seconds);
+
+                if (count($this->sleeps) === 1) {
+                    $this->otherWorker->handle(
+                        static fn (): ResponseInterface => new Response(200, ['X-RateLimit-Remaining' => '0', 'X-RateLimit-Reset' => '60']),
+                        $this->request,
+                        [],
+                    )->wait();
+                }
+            }
+        };
+
+        $sentAt = null;
+        (new RateLimitHandler(
+            new Options(safetyBufferSeconds: 0),
+            new Headers(),
+            $store,
+            new NullLogger(),
+            new DefaultBucketResolver(),
+            new NullLockFactory(),
+            $this->clock,
+            $sleeper,
+        ))->handle(
+            function () use (&$sentAt): ResponseInterface {
+                $sentAt = $this->clock->now();
+
+                return new Response(200, ['X-RateLimit-Remaining' => '5', 'X-RateLimit-Reset' => '60']);
+            },
+            $request,
+            [],
+        )->wait();
+
+        $this->assertSame([10.0, 60.0], $sleeper->sleeps);
+        $this->assertEqualsWithDelta(1_070.0, $sentAt, 0.001);
     }
 
     public function test_lock_is_acquired_and_released(): void

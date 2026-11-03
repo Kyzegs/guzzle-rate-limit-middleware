@@ -130,14 +130,19 @@ final class RateLimit
      */
     private static function resolveReset(ResponseInterface $response, Headers $headers, float $now): float
     {
-        $resetAfter = HeaderParser::value($response, $headers->resetAfter);
+        $resetAfter = HeaderParser::delay($response, $headers->resetAfter, $now);
         if ($resetAfter !== null) {
-            return $now + (float) $resetAfter;
+            return $now + $resetAfter;
         }
 
         $reset = HeaderParser::value($response, $headers->reset);
-        if ($reset !== null) {
+        if (is_numeric($reset) && is_finite((float) $reset)) {
             return self::normaliseTimestamp((float) $reset, $now);
+        }
+
+        $resetDate = HeaderParser::delay($response, $headers->reset, $now);
+        if ($resetDate !== null) {
+            return $now + $resetDate;
         }
 
         $retryAfter = HeaderParser::delay($response, $headers->retryAfter, $now);
@@ -150,10 +155,16 @@ final class RateLimit
 
     /**
      * Treat values below the year-2000 epoch as relative seconds, otherwise as
-     * an absolute UNIX timestamp.
+     * an absolute UNIX timestamp, in seconds or, from 1e11 up, milliseconds.
+     * 1e11 seconds is the year 5138, while 1e11 milliseconds is back in 1973,
+     * so the two ranges cannot be confused for any real reset.
      */
     private static function normaliseTimestamp(float $value, float $now): float
     {
+        if ($value >= 1e11) {
+            return $value / 1000.0;
+        }
+
         return $value < 946684800.0 ? $now + $value : $value;
     }
 }

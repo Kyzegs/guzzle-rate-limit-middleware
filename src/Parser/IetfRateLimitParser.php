@@ -142,17 +142,19 @@ final class IetfRateLimitParser implements RateLimitParserInterface
     /**
      * Seconds until reset are optional in the current draft. Without them the
      * policy window is a safe upper bound — whatever has been used comes back
-     * within one window — and failing that, a numeric Retry-After.
+     * within one window — and failing that, Retry-After.
      */
     private function reset(mixed $resetAfter, mixed $window, ResponseInterface $response, float $now): float
     {
-        foreach ([$resetAfter, $window, HeaderParser::value($response, 'Retry-After')] as $seconds) {
+        foreach ([$resetAfter, $window] as $seconds) {
             if (is_int($seconds) || is_float($seconds) || (is_string($seconds) && is_numeric($seconds))) {
                 return $now + max(0.0, (float) $seconds);
             }
         }
 
-        return 0.0;
+        $retryAfter = HeaderParser::delay($response, 'Retry-After', $now);
+
+        return $retryAfter !== null ? $now + $retryAfter : 0.0;
     }
 
     private function runsOutFirst(RateLimit $candidate, RateLimit $chosen): bool

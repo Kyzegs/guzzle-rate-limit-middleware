@@ -399,7 +399,7 @@ final class RateLimitHandler implements InspectableHandlerInterface
             return $this->reserveAtomically($request, $this->store, $effectiveKey, $overrides);
         }
 
-        $slept = false;
+        $waitedOut = null;
 
         while (true) {
             $lock = $this->lockFactory->make($effectiveKey);
@@ -417,9 +417,11 @@ final class RateLimitHandler implements InspectableHandlerInterface
 
                 $rateLimit = $this->liveState($stored);
 
-                // Unknown allowance, or one that has already been waited out:
-                // only a response can reveal the new window, so go alone.
-                if ($rateLimit === null || $slept) {
+                // Unknown allowance, or the very window already waited out: only
+                // a response can reveal the next one, so go alone. Any other
+                // window means another caller's response landed during the
+                // sleep, and it counts like any other: it may be spent too.
+                if ($rateLimit === null || $rateLimit->reset === $waitedOut) {
                     $keepLock = true;
 
                     return $lock;
@@ -436,6 +438,7 @@ final class RateLimitHandler implements InspectableHandlerInterface
                 }
 
                 $delay = $this->withMargin($rateLimit->secondsUntilReset($this->clock), $overrides);
+                $waitedOut = $rateLimit->reset;
             } finally {
                 if (! $keepLock) {
                     $lock->release();
@@ -443,7 +446,6 @@ final class RateLimitHandler implements InspectableHandlerInterface
             }
 
             $this->waitForBucket($request, $effectiveKey, $delay);
-            $slept = true;
         }
     }
 
